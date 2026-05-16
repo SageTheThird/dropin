@@ -6,18 +6,22 @@ Thanks for poking around! DropIn is small on purpose — a single Node server, v
 
 Requires Node 20+.
 
-1. Copy `.env.example` to `.env` and fill in:
-   - `YOUTUBE_API_KEY` — from [Google Cloud Console](https://console.cloud.google.com/) → enable **YouTube Data API v3** → create an API key.
-   - `SYNC_ROOM_PASSWORD` — optional. If set, the app requires a shared passcode before letting clients in.
-2. Start the server:
+1. Install deps:
+
+   ```bash
+   npm install
+   ```
+
+2. Optionally copy `.env.example` to `.env` and set `SYNC_ROOM_PASSWORD` if you want a passcode gate.
+3. Start the server:
 
    ```bash
    npm run dev
    ```
 
-3. Open `http://localhost:8787` in two browser tabs to test sync.
+4. Open `http://localhost:8787` in two browser tabs to test sync.
 
-No `npm install` needed — the server uses only Node's standard library.
+Search uses YouTube's Innertube API via [`youtubei.js`](https://github.com/LuanRT/YouTube.js) — no API key, no quota.
 
 ## Project Layout
 

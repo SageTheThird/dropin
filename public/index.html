@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#120f13">
     <title>DropIn — listen together</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="mask-icon" href="/favicon.svg" color="#7c9cff">
+    <meta name="apple-mobile-web-app-title" content="DropIn">
+    <meta name="application-name" content="DropIn">
+    <meta property="og:title" content="DropIn — listen together">
+    <meta property="og:description" content="A tiny synced YouTube room for friends.">
+    <meta property="og:type" content="website">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,600;12..96,700;12..96,800&family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@500;600&display=swap" rel="stylesheet">
@@ -68,7 +75,7 @@
 
       <form id="searchForm" class="search-bar" role="search">
         <span class="search-icon" aria-hidden="true"><svg><use href="#i-search"/></svg></span>
-        <input id="searchInput" type="search" placeholder="Search a track or paste a YouTube link" autocomplete="off" enterkeyhint="search">
+        <input id="searchInput" type="search" placeholder="Search, or paste a YouTube video / playlist link" autocomplete="off" enterkeyhint="search">
         <button id="searchButton" type="submit" aria-label="Search">
           <svg aria-hidden="true"><use href="#i-search"/></svg>
         </button>
@@ -100,7 +107,7 @@
               </div>
               <div class="empty-copy">
                 <strong>Drop a track to start</strong>
-                <span>Search above, paste a link, or pick something from the crate.</span>
+                <span>Search above, or paste a YouTube video or playlist link.</span>
               </div>
             </div>
           </div>
@@ -168,7 +175,10 @@
               <span>Explore</span>
               <h2>Crate</h2>
             </div>
-            <small id="searchMessage">Search a song, then tap to add it.</small>
+            <div class="rail-heading-actions">
+              <small id="searchMessage">Search a song or paste a YouTube link.</small>
+              <button id="queueAllButton" class="queue-all-button" type="button" hidden>Queue all</button>
+            </div>
           </div>
           <ul id="searchResults" class="result-list"></ul>
           <div class="rail-empty" data-empty="search" aria-hidden="true">
@@ -178,7 +188,7 @@
           </div>
         </section>
 
-        <details class="listeners-panel room-drawer">
+        <details class="listeners-panel room-drawer" open>
           <summary class="rail-heading compact">
             <div class="room-summary">
               <svg class="room-icon" aria-hidden="true"><use href="#i-people"/></svg>
@@ -215,29 +225,6 @@
         </section>
       </aside>
 
-      <section class="playback-tools" aria-label="Session tools">
-        <details id="pasteDrawer" class="paste-drawer">
-          <summary>
-            <span class="tool-icon" aria-hidden="true"><svg><use href="#i-link"/></svg></span>
-            <span class="tool-copy">Drop a link</span>
-            <span class="tool-hint">YouTube URL</span>
-          </summary>
-          <form id="trackForm" class="paste-form">
-            <input id="trackInput" type="url" placeholder="https://youtube.com/watch?v=..." inputmode="url" required>
-            <input id="titleInput" type="text" placeholder="Optional title">
-            <div class="paste-actions">
-              <button id="loadButton" class="primary-button" type="submit" aria-label="Play now">
-                <svg aria-hidden="true"><use href="#i-play"/></svg>
-                <span>Play</span>
-              </button>
-              <button id="queueButton" class="secondary-button" type="button" aria-label="Add to lineup">
-                <svg aria-hidden="true"><use href="#i-plus"/></svg>
-                <span>Queue</span>
-              </button>
-            </div>
-          </form>
-        </details>
-      </section>
     </main>
 
     <nav class="bottom-bar" aria-label="Quick actions">
@@ -252,10 +239,6 @@
       <button class="bottom-tab" type="button" data-bottom="room" aria-label="Show room">
         <svg aria-hidden="true"><use href="#i-people"/></svg>
         <span>Room</span>
-      </button>
-      <button class="bottom-cta" type="button" data-bottom="drop" aria-label="Drop a link">
-        <svg aria-hidden="true"><use href="#i-link"/></svg>
-        <span>Drop</span>
       </button>
     </nav>
   </body>

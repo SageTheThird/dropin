@@ -24,7 +24,7 @@ Local machine:
 - `ssh.exe`
 - `scp.exe`
 - `tar.exe`
-- `.env` with `YOUTUBE_API_KEY`
+- `.env` (optional — only needed if you want `SYNC_ROOM_PASSWORD`)
 
 Remote VPS:
 
@@ -64,14 +64,14 @@ https://dropin-203-0-113-10.nip.io
 3. Creates a production `.env` containing only:
    - `NODE_ENV`
    - `PORT`
-   - `YOUTUBE_API_KEY`
    - `SYNC_ROOM_PASSWORD` when present
 4. Uploads the app and env file.
 5. Installs Node 20 if needed.
-6. Writes `/etc/systemd/system/dropin.service`.
-7. Enables and restarts the service.
-8. Opens the app port through `ufw` when `ufw` is active.
-9. With `-ConfigureCaddy`, installs Caddy, writes `/etc/caddy/Caddyfile`, opens ports `80` and `443`, and enables HTTPS.
+6. Runs `npm install --omit=dev` on the remote.
+7. Writes `/etc/systemd/system/dropin.service`.
+8. Enables and restarts the service.
+9. Opens the app port through `ufw` when `ufw` is active.
+10. With `-ConfigureCaddy`, installs Caddy, writes `/etc/caddy/Caddyfile`, opens ports `80` and `443`, and enables HTTPS.
 
 ## Useful VPS Commands
 

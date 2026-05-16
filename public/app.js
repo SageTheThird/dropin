@@ -17,11 +17,7 @@ const els = {
   queuePanel: document.querySelector("#queuePanel"),
   searchMessage: document.querySelector("#searchMessage"),
   searchResults: document.querySelector("#searchResults"),
-  trackForm: document.querySelector("#trackForm"),
-  trackInput: document.querySelector("#trackInput"),
-  titleInput: document.querySelector("#titleInput"),
-  loadButton: document.querySelector("#loadButton"),
-  queueButton: document.querySelector("#queueButton"),
+  queueAllButton: document.querySelector("#queueAllButton"),
   controlDeck: document.querySelector(".control-deck"),
   playButton: document.querySelector("#playButton"),
   pauseButton: document.querySelector("#pauseButton"),
@@ -40,7 +36,6 @@ const els = {
   participantList: document.querySelector("#participantList"),
   participantCount: document.querySelector("#participantCount"),
   toast: document.querySelector("#toast"),
-  pasteDrawer: document.querySelector("#pasteDrawer"),
   bottomTabs: document.querySelectorAll(".bottom-tab, .bottom-cta"),
   searchPanelEmpty: document.querySelector("#searchPanel"),
   queuePanelEmpty: document.querySelector("#queuePanel")
@@ -62,7 +57,11 @@ const state = {
   heartbeatTimer: null,
   lastPlayerState: null,
   lastSeekBroadcastAt: 0,
-  lastSeq: -1
+  lastSeq: -1,
+  lastQueueSig: "",
+  lastParticipantSig: "",
+  lastResults: null,
+  lastBulkAddUrl: ""
 };
 
 window.addEventListener("error", (event) => {
@@ -117,9 +116,19 @@ function bindEvents() {
     window.clearTimeout(state.searchTimer);
     const query = els.searchInput.value.trim();
     if (query.length < 2) {
-      els.searchMessage.textContent = "Search a song, then tap to add it.";
+      if (state.searchAbort) state.searchAbort.abort();
+      els.searchMessage.textContent = "Search a song or paste a YouTube link.";
       els.searchResults.replaceChildren();
+      state.lastResults = null;
+      state.lastBulkAddUrl = "";
+      renderQueueAllButton();
+      refreshEmptyStates();
       return;
+    }
+    if (looksLikeYouTubeUrl(query)) {
+      els.searchMessage.textContent = /[?&]list=/.test(query)
+        ? "Loading playlist..."
+        : "Loading track...";
     }
     state.searchTimer = window.setTimeout(() => runSearch(query), 300);
     refreshEmptyStates();
@@ -127,13 +136,8 @@ function bindEvents() {
 
   els.searchTabButton.addEventListener("click", () => setRailTab("search"));
   els.queueTabButton.addEventListener("click", () => setRailTab("queue"));
+  els.queueAllButton.addEventListener("click", queueAllItems);
 
-  els.trackForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    submitTrack("load");
-  });
-
-  els.queueButton.addEventListener("click", () => submitTrack("enqueue"));
   els.playButton.addEventListener("click", () => sendPlaybackCommand({ type: "play", position: getPlayerTime() }));
   els.pauseButton.addEventListener("click", () => sendPlaybackCommand({ type: "pause", position: getPlayerTime() }));
   els.nextButton.addEventListener("click", () => sendPlaybackCommand({ type: "next" }));
@@ -168,12 +172,6 @@ function bindBottomBar() {
         if (drawer) {
           drawer.open = true;
           scrollSideRail();
-        }
-      } else if (target === "drop") {
-        if (els.pasteDrawer) {
-          els.pasteDrawer.open = true;
-          els.pasteDrawer.scrollIntoView({ behavior: "smooth", block: "center" });
-          window.setTimeout(() => els.trackInput.focus(), 280);
         }
       }
       updateBottomActive(target);
@@ -307,16 +305,49 @@ async function copyText(value) {
   textArea.remove();
 }
 
-function submitTrack(type) {
-  const sourceUrl = els.trackInput.value.trim();
-  if (!sourceUrl) return;
-  sendCommand({
-    type: type === "load" && !isHost() ? "enqueue" : type,
-    sourceUrl,
-    title: els.titleInput.value.trim()
-  });
-  els.trackInput.value = "";
-  els.titleInput.value = "";
+function looksLikeYouTubeUrl(value) {
+  const str = String(value || "").trim();
+  if (!str) return false;
+  try {
+    const url = new URL(str);
+    const host = url.hostname.replace(/^www\./, "");
+    return host === "youtu.be" || host.endsWith("youtube.com") || host.endsWith("youtube-nocookie.com");
+  } catch {
+    return false;
+  }
+}
+
+function queueAllItems() {
+  if (state.lastBulkAddUrl) {
+    sendCommand({ type: "enqueue", sourceUrl: state.lastBulkAddUrl });
+    showToast("Adding playlist to lineup", "ok");
+    return;
+  }
+  const items = state.lastResults || [];
+  if (items.length === 0) return;
+  for (const item of items) {
+    sendCommand({
+      type: "enqueue",
+      videoId: item.videoId,
+      title: item.title,
+      sourceUrl: item.sourceUrl,
+      channelTitle: item.channelTitle,
+      thumbnail: item.thumbnail,
+      durationLabel: item.durationLabel
+    });
+  }
+  showToast(`Added ${items.length} tracks`, "ok");
+}
+
+function renderQueueAllButton() {
+  if (!els.queueAllButton) return;
+  const items = state.lastResults || [];
+  const show = items.length > 1;
+  els.queueAllButton.hidden = !show;
+  if (show) {
+    const label = state.lastBulkAddUrl ? "Queue playlist" : "Queue all";
+    els.queueAllButton.textContent = `${label} (${items.length})`;
+  }
 }
 
 async function runSearch(query) {
@@ -340,14 +371,28 @@ async function runSearch(query) {
       return;
     }
 
-    renderSearchResults(data.items || []);
-    els.searchMessage.textContent = data.items?.length ? `${data.items.length} results` : "No results found.";
+    const items = data.items || [];
+    state.lastResults = items;
+    state.lastBulkAddUrl = data.bulkAddUrl || "";
+    renderSearchResults(items);
+    renderQueueAllButton();
+    const sourceLabel = data.source === "playlist"
+      ? `${items.length} tracks in playlist`
+      : data.source === "video"
+        ? "1 track"
+        : items.length
+          ? `${items.length} results`
+          : "No results found.";
+    els.searchMessage.textContent = sourceLabel;
     setRailTab("search");
     refreshEmptyStates();
   } catch (error) {
     if (error.name === "AbortError") return;
     els.searchResults.replaceChildren();
     els.searchMessage.textContent = "Search is unavailable right now.";
+    state.lastResults = null;
+    state.lastBulkAddUrl = "";
+    renderQueueAllButton();
   }
 }
 
@@ -527,7 +572,7 @@ function applyRoomState(room, eventName) {
     return;
   }
 
-  const currentVideo = state.player.getVideoData?.().video_id;
+  const currentVideo = state.player?.getVideoData?.()?.video_id;
   const desiredTime = effectiveRemotePosition(room);
 
   if (isHost() && (eventName === "sync" || eventName === "heartbeat")) return;
@@ -610,6 +655,26 @@ function renderRoom(room) {
   els.queueCount.textContent = String(sessionQueue.length);
   els.participantCount.textContent = String(room.participants.length);
 
+  const queueSig = sessionQueue
+    .map(({ track, status, index }) => `${track.id}|${status}|${index}|${track.thumbnail}|${track.title}|${track.addedBy}`)
+    .join("~");
+  if (queueSig !== state.lastQueueSig) {
+    state.lastQueueSig = queueSig;
+    renderQueueList(sessionQueue);
+  }
+
+  const participantSig = room.participants
+    .map((p) => `${p.id}|${p.name}|${p.color}|${p.id === room.hostId ? "host" : ""}`)
+    .join("~");
+  if (participantSig !== state.lastParticipantSig) {
+    state.lastParticipantSig = participantSig;
+    renderParticipantList(room);
+  }
+
+  refreshEmptyStates();
+}
+
+function renderQueueList(sessionQueue) {
   els.queueList.replaceChildren(
     ...sessionQueue.map(({ track, status, index }) => {
       const item = document.createElement("li");
@@ -663,24 +728,27 @@ function renderRoom(room) {
       const remove = document.createElement("button");
       remove.className = "remove-button";
       remove.type = "button";
-      if (status === "upcoming") {
-        remove.title = "Remove from queue";
+      if (status === "current") {
+        remove.disabled = true;
+      } else {
+        const label = status === "played" ? "Remove from history" : "Remove from queue";
+        remove.title = label;
         remove.innerHTML = svgUse("i-close");
-        remove.setAttribute("aria-label", "Remove from queue");
+        remove.setAttribute("aria-label", label);
         remove.addEventListener("click", (event) => {
           event.stopPropagation();
           sendCommand({ type: "remove", trackId: track.id });
           showToast("Removed from lineup", "ok");
         });
-      } else {
-        remove.disabled = true;
       }
 
       item.append(indexBadge, thumb, content, remove);
       return item;
     })
   );
+}
 
+function renderParticipantList(room) {
   els.participantList.replaceChildren(
     ...room.participants.map((participant) => {
       const item = document.createElement("li");
@@ -702,8 +770,6 @@ function renderRoom(room) {
       return item;
     })
   );
-
-  refreshEmptyStates();
 }
 
 function buildSessionQueue(room) {
@@ -835,11 +901,6 @@ function updateControlState(room) {
     button.disabled = !hasVideo;
     button.title = canControl ? button.dataset.title : "Only the host can control playback";
   }
-  const loadIcon = canControl ? "i-play" : "i-plus";
-  const loadLabel = canControl ? "Play" : "Queue";
-  els.loadButton.innerHTML = `${svgUse(loadIcon)}<span>${loadLabel}</span>`;
-  els.loadButton.title = canControl ? "Play now" : "Add to queue";
-  els.loadButton.setAttribute("aria-label", canControl ? "Play now" : "Add to queue");
 }
 
 function statusLabel(status) {
@@ -923,7 +984,10 @@ function tintColor(hex, amount = 16) {
 }
 
 function formatViews(value) {
-  const count = Number(value || 0);
+  if (value == null || value === "") return "views unavailable";
+  const str = String(value).trim();
+  if (/\D/.test(str)) return str;
+  const count = Number(str);
   if (!count) return "views unavailable";
   if (count >= 1_000_000_000) return `${trimNumber(count / 1_000_000_000)}B views`;
   if (count >= 1_000_000) return `${trimNumber(count / 1_000_000)}M views`;
@@ -937,13 +1001,16 @@ function trimNumber(value) {
 
 function formatPublishedAt(value) {
   if (!value) return "date unavailable";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "date unavailable";
-  return new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric"
-  }).format(date);
+  const str = String(value).trim();
+  const date = new Date(str);
+  if (!Number.isNaN(date.getTime()) && /\d{4}/.test(str)) {
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric"
+    }).format(date);
+  }
+  return str || "date unavailable";
 }
 
 function sanitizeRoomId(value) {

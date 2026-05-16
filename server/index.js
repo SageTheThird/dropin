@@ -3,6 +3,7 @@ import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
+import { Innertube } from "youtubei.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = normalize(join(__dirname, ".."));
@@ -278,116 +279,214 @@ function loadPlaylistIndex(room, index, position = 0) {
   syncQueueFromPlaylist(room);
 }
 
-function decodeHtml(value) {
-  return String(value || "")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, "\"")
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
-}
-
 function proxyThumbnailUrl(url) {
-  return url ? `/api/thumb?url=${encodeURIComponent(url)}` : "";
+  return url && /^https:\/\/(i\.ytimg\.com|img\.youtube\.com)\//.test(url)
+    ? `/api/thumb?url=${encodeURIComponent(url)}`
+    : "";
 }
 
-async function searchYouTube(query) {
-  const apiKey = process.env.YOUTUBE_API_KEY || "";
-  if (!apiKey) {
-    const err = new Error("YouTube search needs YOUTUBE_API_KEY. Paste a URL for now, or add the key and restart.");
-    err.status = 501;
+let innertubePromise = null;
+function getInnertube() {
+  if (!innertubePromise) {
+    innertubePromise = Innertube.create().catch((err) => {
+      innertubePromise = null;
+      throw err;
+    });
+  }
+  return innertubePromise;
+}
+
+function textOf(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "object") {
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.toString === "function") {
+      const out = value.toString();
+      return out === "[object Object]" ? "" : out;
+    }
+  }
+  return "";
+}
+
+function pickThumbnail(thumbnails) {
+  if (!Array.isArray(thumbnails) || thumbnails.length === 0) return "";
+  const sorted = [...thumbnails].sort((a, b) => (b?.width || 0) - (a?.width || 0));
+  return sorted[0]?.url || "";
+}
+
+function formatSecondsLabel(seconds) {
+  const total = Number(seconds);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = Math.floor(total % 60);
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
+function extractPlaylistId(value) {
+  const input = String(value || "").trim();
+  if (!input) return "";
+  if (/^(PL|OL|UU|LL|FL|RD)[a-zA-Z0-9_-]{10,}$/.test(input)) return input;
+  try {
+    const url = new URL(input);
+    const host = url.hostname.replace(/^www\./, "");
+    if (host.endsWith("youtube.com") || host.endsWith("youtube-nocookie.com") || host === "youtu.be") {
+      return url.searchParams.get("list") || "";
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+
+const MAX_PLAYLIST_TRACKS = 100;
+
+async function fetchPlaylistTracks(playlistId) {
+  let yt;
+  try {
+    yt = await getInnertube();
+  } catch (cause) {
+    const err = new Error("YouTube search backend failed to initialize.");
+    err.status = 502;
+    err.cause = cause;
     throw err;
   }
 
-  const params = new URLSearchParams({
-    part: "snippet",
-    q: query,
-    type: "video",
-    maxResults: "50",
-    safeSearch: "moderate",
-    key: apiKey
-  });
+  let playlist;
+  try {
+    playlist = await yt.getPlaylist(playlistId);
+  } catch (cause) {
+    const err = new Error("Could not load that playlist (private, region-locked, or removed).");
+    err.status = 404;
+    err.cause = cause;
+    throw err;
+  }
 
-  const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
-  const data = await response.json().catch(() => ({}));
+  const videos = Array.isArray(playlist?.videos) ? playlist.videos : Array.isArray(playlist?.items) ? playlist.items : [];
+  return videos
+    .map((video) => {
+      const videoId = video?.id || video?.video_id || "";
+      if (!videoId) return null;
+      const durationText = textOf(video.duration) || textOf(video.length_text);
+      const durationSeconds = video?.duration?.seconds ?? 0;
+      return {
+        videoId,
+        title: textOf(video.title) || "YouTube video",
+        sourceUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        channelTitle: textOf(video?.author?.name),
+        thumbnail: proxyThumbnailUrl(pickThumbnail(video.thumbnails)),
+        durationLabel: durationText || formatSecondsLabel(durationSeconds)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, MAX_PLAYLIST_TRACKS);
+}
+
+async function fetchVideoInfo(videoId) {
+  const sourceUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(sourceUrl)}&format=json`;
+
+  let response;
+  try {
+    response = await fetch(oembedUrl);
+  } catch (cause) {
+    const err = new Error("Could not reach YouTube to resolve that video.");
+    err.status = 502;
+    err.cause = cause;
+    throw err;
+  }
 
   if (!response.ok) {
-    const message = data?.error?.message || "YouTube search failed.";
-    const err = new Error(message);
-    err.status = response.status;
+    const err = new Error("Could not load that video (private, removed, or region-locked).");
+    err.status = response.status === 401 || response.status === 404 ? 404 : 502;
     throw err;
   }
 
-  const baseItems = (data.items || [])
-    .filter((item) => item?.id?.videoId)
-    .map((item) => {
-      const snippet = item.snippet || {};
-      return {
-        videoId: item.id.videoId,
-        title: decodeHtml(snippet.title || "YouTube video"),
-        description: decodeHtml(snippet.description || ""),
-        channelId: snippet.channelId || "",
-        channelTitle: decodeHtml(snippet.channelTitle || ""),
-        publishedAt: snippet.publishedAt || "",
-        liveBroadcastContent: snippet.liveBroadcastContent || "none",
-        thumbnails: snippet.thumbnails || {},
-        thumbnail:
-          proxyThumbnailUrl(
-            snippet.thumbnails?.high?.url ||
-            snippet.thumbnails?.medium?.url ||
-            snippet.thumbnails?.default?.url ||
-            ""
-          ),
-        sourceUrl: `https://www.youtube.com/watch?v=${item.id.videoId}`
-      };
-    });
-
+  const data = await response.json().catch(() => ({}));
+  const thumbUrl = typeof data.thumbnail_url === "string" ? data.thumbnail_url : "";
   return {
-    items: await enrichVideoResults(baseItems)
+    videoId,
+    title: String(data.title || "YouTube video"),
+    description: "",
+    channelId: "",
+    channelTitle: String(data.author_name || ""),
+    publishedAt: "",
+    liveBroadcastContent: "none",
+    thumbnails: thumbUrl ? [{ url: thumbUrl }] : [],
+    thumbnail: proxyThumbnailUrl(thumbUrl),
+    sourceUrl,
+    durationLabel: "",
+    viewCount: ""
   };
 }
 
-async function enrichVideoResults(items) {
-  const apiKey = process.env.YOUTUBE_API_KEY || "";
-  const ids = items.map((item) => item.videoId).join(",");
-  if (!apiKey || !ids) return items;
-
-  const params = new URLSearchParams({
-    part: "contentDetails,statistics",
-    id: ids,
-    key: apiKey
-  });
-
-  const response = await fetch(`https://www.googleapis.com/youtube/v3/videos?${params.toString()}`);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) return items;
-
-  const detailsById = new Map((data.items || []).map((item) => [item.id, item]));
-  return items.map((item) => {
-    const details = detailsById.get(item.videoId) || {};
-    const duration = details.contentDetails?.duration || "";
-    const statistics = details.statistics || {};
+async function searchYouTube(query) {
+  const playlistId = extractPlaylistId(query);
+  if (playlistId) {
+    const items = await fetchPlaylistTracks(playlistId);
     return {
-      ...item,
-      duration,
-      durationLabel: formatDuration(duration),
-      viewCount: statistics.viewCount || "",
-      likeCount: statistics.likeCount || "",
-      commentCount: statistics.commentCount || ""
+      items,
+      source: "playlist",
+      bulkAddUrl: items.length > 0 ? query : ""
     };
-  });
-}
-
-function formatDuration(duration) {
-  const match = String(duration).match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/);
-  if (!match) return "";
-  const hours = Number(match[1] || 0);
-  const minutes = Number(match[2] || 0);
-  const seconds = Number(match[3] || 0);
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+
+  const directId = extractYouTubeId(query);
+  if (directId && /^https?:\/\//i.test(query.trim())) {
+    const item = await fetchVideoInfo(directId);
+    return { items: [item], source: "video" };
+  }
+
+  let yt;
+  try {
+    yt = await getInnertube();
+  } catch (cause) {
+    const err = new Error("YouTube search backend failed to initialize.");
+    err.status = 502;
+    err.cause = cause;
+    throw err;
+  }
+
+  let results;
+  try {
+    results = await yt.search(query, { type: "video", safe_search: true });
+  } catch (cause) {
+    const err = new Error("YouTube search failed.");
+    err.status = 502;
+    err.cause = cause;
+    throw err;
+  }
+
+  const videos = Array.isArray(results.videos) ? results.videos : [];
+  const items = videos
+    .map((video) => {
+      const videoId = video?.id || video?.video_id || "";
+      if (!videoId) return null;
+      const durationText = textOf(video.duration) || textOf(video.length_text);
+      const durationSeconds = video?.duration?.seconds ?? 0;
+      const thumbUrl = pickThumbnail(video.thumbnails);
+      return {
+        videoId,
+        title: textOf(video.title) || "YouTube video",
+        description: textOf(video.description_snippet) || textOf(video.description),
+        channelId: video?.author?.id || "",
+        channelTitle: textOf(video?.author?.name),
+        publishedAt: textOf(video.published),
+        liveBroadcastContent: video?.is_live ? "live" : "none",
+        thumbnails: video.thumbnails || [],
+        thumbnail: proxyThumbnailUrl(thumbUrl),
+        sourceUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        durationLabel: durationText || formatSecondsLabel(durationSeconds),
+        viewCount: textOf(video.short_view_count) || textOf(video.view_count)
+      };
+    })
+    .filter(Boolean);
+
+  return { items, source: "search" };
 }
 
 function extractYouTubeId(value) {
@@ -532,8 +631,10 @@ function applyCommand(room, command) {
     case "remove": {
       const id = String(command.trackId || "");
       const index = room.playlist.findIndex((track) => track.id === id);
-      if (index === -1 || index <= room.currentIndex) return;
+      if (index === -1) return;
+      if (index === room.currentIndex) return;
       room.playlist.splice(index, 1);
+      if (index < room.currentIndex) room.currentIndex -= 1;
       syncQueueFromPlaylist(room);
       touchRoom(room);
       return;
@@ -647,6 +748,29 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && action === "commands") {
     const command = await readBody(req);
+    if (command.type === "enqueue" || command.type === "load") {
+      const playlistId = extractPlaylistId(command.sourceUrl || command.url || "");
+      if (playlistId) {
+        const tracks = await fetchPlaylistTracks(playlistId);
+        if (tracks.length === 0) {
+          sendJson(res, { error: "Playlist had no playable items." }, 404);
+          return true;
+        }
+        if (command.type === "load") {
+          applyCommand(room, { ...command, type: "load", ...tracks[0] });
+          for (const track of tracks.slice(1)) {
+            applyCommand(room, { ...command, type: "enqueue", ...track });
+          }
+        } else {
+          for (const track of tracks) {
+            applyCommand(room, { ...command, type: "enqueue", ...track });
+          }
+        }
+        broadcast(room, "state");
+        sendJson(res, { ...snapshot(room), addedFromPlaylist: tracks.length });
+        return true;
+      }
+    }
     applyCommand(room, command);
     broadcast(room, command.type === "heartbeat" ? "sync" : command.type || "state");
     sendJson(res, snapshot(room));

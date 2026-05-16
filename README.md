@@ -11,30 +11,29 @@ DropIn does **not** proxy, download, or rebroadcast audio. Each listener plays t
 - **Live updates** — Server-Sent Events push room snapshots; no polling.
 - **Optional passcode gate** — a single shared password locks the app for friends-only use.
 - **Local volume** — each listener controls their own volume.
-- **No build step** — vanilla JS frontend, Node stdlib server, no `npm install`.
+- **No build step** — vanilla JS frontend, minimal Node server.
 
 ## Quick Start
 
 Requires Node 20+.
 
 ```bash
-# 1. Get a YouTube Data API v3 key from Google Cloud Console.
-# 2. Copy the example env and fill it in.
-cp .env.example .env
+npm install
+cp .env.example .env   # optional — only needed if you want a passcode gate
 
-# 3. Run.
 npm run dev
 ```
 
 Open `http://localhost:8787`. Open the same room link in a second tab to test sync.
 
+Search uses YouTube's internal Innertube API (via [`youtubei.js`](https://github.com/LuanRT/YouTube.js)) — no API key, no daily quota.
+
 ### Environment variables
 
-| Key                  | Required | Purpose                                                    |
-| -------------------- | -------- | ---------------------------------------------------------- |
-| `YOUTUBE_API_KEY`    | yes      | YouTube Data API v3 key. Used only for `/api/search`.      |
-| `SYNC_ROOM_PASSWORD` | no       | If set, clients must enter this passcode before joining.   |
-| `PORT`               | no       | Defaults to `8787`.                                        |
+| Key                  | Required | Purpose                                                  |
+| -------------------- | -------- | -------------------------------------------------------- |
+| `SYNC_ROOM_PASSWORD` | no       | If set, clients must enter this passcode before joining. |
+| `PORT`               | no       | Defaults to `8787`.                                      |
 
 ## Deploy to a VPS
 

@@ -85,11 +85,7 @@ if (Test-Path $localEnv) {
   }
 }
 
-if (-not $envMap.ContainsKey("YOUTUBE_API_KEY") -or -not $envMap["YOUTUBE_API_KEY"]) {
-  throw "YOUTUBE_API_KEY is missing from .env."
-}
-
-$allowedEnv = @("YOUTUBE_API_KEY", "SYNC_ROOM_PASSWORD")
+$allowedEnv = @("SYNC_ROOM_PASSWORD")
 $envLines = @("NODE_ENV=production", "PORT=$AppPort")
 foreach ($key in $allowedEnv) {
   if ($envMap.ContainsKey($key) -and $envMap[$key]) {
@@ -144,6 +140,10 @@ mkdir -p "`$REMOTE_DIR"
 tar -xzf /tmp/dropin.tar.gz -C "`$REMOTE_DIR"
 mv /tmp/dropin.env "`$REMOTE_DIR/.env"
 chmod 600 "`$REMOTE_DIR/.env"
+
+cd "`$REMOTE_DIR"
+npm install --omit=dev --no-audit --no-fund
+cd -
 
 NODE_BIN="`$(command -v node)"
 cat > "/etc/systemd/system/`$SERVICE_NAME.service" <<SERVICE

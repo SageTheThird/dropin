@@ -1364,6 +1364,42 @@ body.is-playing .now-vinyl-disc {
   max-height: min(74vh, 720px);
 }
 
+.rail-heading-actions {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  align-content: center;
+}
+
+.queue-all-button {
+  padding: 6px 12px;
+  border: 1px solid rgba(124, 156, 255, 0.45);
+  background: linear-gradient(135deg, rgba(124, 156, 255, 0.22), rgba(124, 156, 255, 0.08));
+  color: var(--text, #f6f4ff);
+  font: inherit;
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, transform 80ms ease;
+}
+
+.queue-all-button:hover {
+  background: linear-gradient(135deg, rgba(124, 156, 255, 0.38), rgba(124, 156, 255, 0.14));
+}
+
+.queue-all-button:active {
+  transform: translateY(1px);
+}
+
+.queue-all-button[hidden] {
+  display: none;
+}
+
+
 .rail-empty {
   display: none;
   padding: 24px 18px 32px;

@@ -11,3 +11,8 @@ tmp-*
 .cloudflared/
 .vscode/
 .idea/
+
+# Local tooling / agent artifacts
+.omo/
+.playwright-mcp/
+.serena/

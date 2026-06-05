@@ -61,7 +61,9 @@ const state = {
   lastQueueSig: "",
   lastParticipantSig: "",
   lastResults: null,
-  lastBulkAddUrl: ""
+  lastBulkAddUrl: "",
+  spotifyImporting: false,
+  importJob: null
 };
 
 window.addEventListener("error", (event) => {
@@ -317,6 +319,18 @@ function looksLikeYouTubeUrl(value) {
   }
 }
 
+function looksLikeSpotifyUrl(value) {
+  const str = String(value || "").trim();
+  if (!str) return false;
+  if (/^spotify:(playlist|album|track):[a-zA-Z0-9]{22}\b/.test(str)) return true;
+  try {
+    const url = new URL(str);
+    return url.hostname.replace(/^www\./, "") === "open.spotify.com";
+  } catch {
+    return false;
+  }
+}
+
 function queueAllItems() {
   if (state.lastBulkAddUrl) {
     sendCommand({ type: "enqueue", sourceUrl: state.lastBulkAddUrl });
@@ -350,8 +364,137 @@ function renderQueueAllButton() {
   }
 }
 
+async function startSpotifyImport(url) {
+  if (state.spotifyImporting) return;
+  state.spotifyImporting = true;
+  state.importJob = null;
+  els.searchMessage.textContent = "Starting Spotify import…";
+  renderImportPanel("loading");
+
+  try {
+    const response = await fetch(`/api/rooms/${state.roomId}/spotify-import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url,
+        clientId,
+        clientName: els.nameInput.value.trim() || "Listener",
+        clientColor
+      })
+    });
+
+    if (response.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      const errMsg = data?.error || "Spotify import failed.";
+      els.searchMessage.textContent = errMsg;
+      renderImportPanel("error", { error: errMsg });
+      showToast(errMsg, "bad");
+      return;
+    }
+
+    state.importJob = {
+      jobId: data.jobId,
+      total: data.total,
+      done: 0,
+      matchedCount: 0,
+      unmatchedCount: 0,
+      currentTitle: "",
+      name: data.name,
+      cover: data.cover,
+      unmatched: []
+    };
+
+    renderImportPanel("progress", state.importJob);
+    showToast(`Importing "${data.name}" (${data.total} tracks)`, "ok");
+  } catch (error) {
+    els.searchMessage.textContent = "Spotify import failed.";
+    renderImportPanel("error", { error: "Network error" });
+    showToast("Spotify import failed", "bad");
+    state.spotifyImporting = false;
+  }
+}
+
+function renderImportPanel(state, info = {}) {
+  els.searchResults.replaceChildren();
+  const container = document.createElement("div");
+  container.className = "import-panel";
+
+  if (state === "loading") {
+    container.innerHTML = `
+      <div class="import-spinner"></div>
+      <p class="import-status">Fetching and matching tracks…</p>
+      <p class="import-subtitle">This may take a moment for large playlists.</p>
+    `;
+  } else if (state === "progress") {
+    const pct = info.total > 0 ? Math.round((info.done / info.total) * 100) : 0;
+    const coverHtml = info.cover
+      ? `<img class="import-cover" src="${info.cover}" alt="" loading="lazy">`
+      : "";
+    const nameHtml = info.name
+      ? `<p class="import-playlist-name">${escapeHtml(info.name)}</p>`
+      : "";
+    container.innerHTML = `
+      ${coverHtml}
+      ${nameHtml}
+      <div class="import-progress-bar">
+        <div class="import-progress-fill" style="width:${pct}%"></div>
+      </div>
+      <p class="import-status">${info.done} / ${info.total} tracks</p>
+      <p class="import-current">${info.currentTitle ? `Matching: ${escapeHtml(info.currentTitle)}` : ""}</p>
+      <div class="import-stats">
+        <span class="import-stat import-stat--ok">${info.matchedCount} matched</span>
+        ${info.unmatchedCount > 0 ? `<span class="import-stat import-stat--warn">${info.unmatchedCount} not found</span>` : ""}
+      </div>
+    `;
+  } else if (state === "error") {
+    container.innerHTML = `
+      <div class="import-icon import-icon--bad">
+        <svg aria-hidden="true"><use href="#i-close"/></svg>
+      </div>
+      <p class="import-status">${info.error || "Import failed"}</p>
+    `;
+  } else if (state === "done") {
+    const coverHtml = info.cover
+      ? `<img class="import-cover" src="${info.cover}" alt="" loading="lazy">`
+      : "";
+    const nameHtml = info.name
+      ? `<p class="import-playlist-name">${escapeHtml(info.name)}</p>`
+      : "";
+    const unmatchedHtml = (info.unmatched && info.unmatched.length > 0)
+      ? `<details class="import-unmatched">
+          <summary>${info.unmatched.length} couldn't match</summary>
+          <ul>${info.unmatched.map((t) => `<li>${escapeHtml(t.title)}${t.artist ? ` — ${escapeHtml(t.artist)}` : ""}</li>`).join("")}</ul>
+        </details>`
+      : "";
+    container.innerHTML = `
+      ${coverHtml}
+      ${nameHtml}
+      <div class="import-icon import-icon--ok">
+        <svg aria-hidden="true"><use href="#i-check"/></svg>
+      </div>
+      <p class="import-status">Import complete!</p>
+      <div class="import-stats">
+        <span class="import-stat import-stat--ok">${info.matchedCount} matched</span>
+        ${info.unmatchedCount > 0 ? `<span class="import-stat import-stat--warn">${info.unmatchedCount} not found</span>` : ""}
+      </div>
+      ${unmatchedHtml}
+    `;
+  }
+
+  els.searchResults.append(container);
+}
+
 async function runSearch(query) {
   if (query.length < 2) return;
+  if (looksLikeSpotifyUrl(query)) {
+    if (state.spotifyImporting) return;
+    return startSpotifyImport(query);
+  }
   if (state.searchAbort) state.searchAbort.abort();
   state.searchAbort = new AbortController();
   els.searchMessage.textContent = "Searching...";
@@ -498,6 +641,35 @@ function connectEvents() {
       applyRoomState(JSON.parse(event.data), eventName);
     });
   }
+
+  state.eventSource.addEventListener("import-progress", (event) => {
+    const data = JSON.parse(event.data);
+    if (state.importJob && data.jobId === state.importJob.jobId) {
+      state.importJob.done = data.done;
+      state.importJob.matchedCount = data.matchedCount;
+      state.importJob.unmatchedCount = data.unmatchedCount;
+      state.importJob.currentTitle = data.currentTitle;
+      renderImportPanel("progress", state.importJob);
+    }
+  });
+
+  state.eventSource.addEventListener("import-complete", (event) => {
+    const data = JSON.parse(event.data);
+    if (state.importJob && data.jobId === state.importJob.jobId) {
+      state.importJob.matchedCount = data.matchedCount;
+      state.importJob.unmatchedCount = data.unmatchedCount;
+      state.importJob.unmatched = data.unmatched || [];
+      renderImportPanel("done", state.importJob);
+      const msg = `Added ${data.matchedCount} tracks from Spotify`;
+      if (data.unmatchedCount > 0) {
+        showToast(msg + ` (${data.unmatchedCount} not found)`, "warn");
+      } else {
+        showToast(msg, "ok");
+      }
+      state.spotifyImporting = false;
+      state.importJob = null;
+    }
+  });
 
   state.eventSource.addEventListener("open", () => {
     flashStatus("In sync", "ok");
@@ -1011,6 +1183,10 @@ function formatPublishedAt(value) {
     }).format(date);
   }
   return str || "date unavailable";
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function sanitizeRoomId(value) {

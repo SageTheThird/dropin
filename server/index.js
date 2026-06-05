@@ -4,6 +4,7 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { Innertube } from "youtubei.js";
+import { fetchSpotifyTracks } from "./spotify.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = normalize(join(__dirname, ".."));
@@ -120,6 +121,13 @@ function snapshot(room) {
 
 function broadcast(room, event = "state") {
   const payload = `event: ${event}\ndata: ${JSON.stringify(snapshot(room))}\n\n`;
+  for (const client of room.clients.values()) {
+    client.write(payload);
+  }
+}
+
+function broadcastRaw(room, eventType, data) {
+  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of room.clients.values()) {
     client.write(payload);
   }
@@ -343,6 +351,31 @@ function extractPlaylistId(value) {
   return "";
 }
 
+function extractSpotifyRef(value) {
+  const input = String(value || "").trim();
+  if (!input) return null;
+
+  const uriMatch = input.match(/^spotify:(playlist|album|track):([a-zA-Z0-9]{22})\b/);
+  if (uriMatch) return { type: uriMatch[1], id: uriMatch[2] };
+
+  try {
+    const url = new URL(input);
+    const host = url.hostname.replace(/^www\./, "");
+    if (host !== "open.spotify.com") return null;
+
+    const parts = url.pathname.split("/").filter(Boolean);
+    const validTypes = ["playlist", "album", "track"];
+    const typeIdx = parts.findIndex((p) => validTypes.includes(p));
+    if (typeIdx >= 0 && parts[typeIdx + 1]) {
+      const id = parts[typeIdx + 1].split("?")[0];
+      return { type: parts[typeIdx], id };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 const MAX_PLAYLIST_TRACKS = 100;
 
 async function fetchPlaylistTracks(playlistId) {
@@ -487,6 +520,265 @@ async function searchYouTube(query) {
     .filter(Boolean);
 
   return { items, source: "search" };
+}
+
+function parseDurationToSeconds(label) {
+  if (!label || typeof label !== "string") return 0;
+  const parts = label.split(":").map(Number);
+  if (parts.some(isNaN)) return 0;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 1) return parts[0];
+  return 0;
+}
+
+function parseViewCount(text) {
+  if (!text || typeof text !== "string") return 0;
+  // "367M views" -> 367000000, "3.8M views" -> 3800000, "848K views" -> 848000, "367,353,891 views" -> 367353891
+  const cleaned = text.replace(/,/g, "");
+  const mMatch = cleaned.match(/^([\d.]+)\s*M/);
+  if (mMatch) return Math.round(parseFloat(mMatch[1]) * 1_000_000);
+  const kMatch = cleaned.match(/^([\d.]+)\s*K/);
+  if (kMatch) return Math.round(parseFloat(kMatch[1]) * 1_000);
+  const numMatch = cleaned.match(/^([\d.]+)/);
+  if (numMatch) return Math.round(parseFloat(numMatch[1]));
+  return 0;
+}
+
+function scoreVideoMatch(spotifyTrack, ytVideo) {
+  const ytTitle = (textOf(ytVideo.title) || "").toLowerCase();
+  const ytChannel = (textOf(ytVideo?.author?.name) || "").toLowerCase();
+  const spTitle = (spotifyTrack.title || "").toLowerCase();
+  const spArtist = (spotifyTrack.artist || "").toLowerCase();
+
+  let score = 0;
+
+  // 1. Token overlap (+3/token)
+  const spTokens = spTitle.split(/\s+/).filter((t) => t.length > 2);
+  for (const token of spTokens) {
+    if (ytTitle.includes(token)) score += 3;
+  }
+
+  // 2. Artist match (+10 any artist, +12 ALL artists) — split multi-artist
+  if (spArtist.length > 2) {
+    const artists = spArtist.split(/[,;&]\s*/).map((a) => a.trim()).filter((a) => a.length > 2);
+    let matchedArtists = 0;
+    for (const artist of artists) {
+      if (ytTitle.includes(artist) || ytChannel.includes(artist)) matchedArtists++;
+    }
+    if (matchedArtists === artists.length) score += 12; // all artists found
+    else if (matchedArtists > 0) score += 10; // at least one artist found
+  }
+
+  // 3. Duration proximity (+5/<5s, +3/<15s, +1/<30s)
+  const spSec = spotifyTrack.durationMs > 0 ? spotifyTrack.durationMs / 1000 : 0;
+  let ytSec = ytVideo?.duration?.seconds ?? 0;
+  if (ytSec === 0) {
+    const durLabel = textOf(ytVideo.duration) || textOf(ytVideo.length_text) || "";
+    ytSec = parseDurationToSeconds(durLabel);
+  }
+  if (spSec > 0 && ytSec > 0) {
+    const diff = Math.abs(ytSec - spSec);
+    if (diff < 5) score += 5;
+    else if (diff < 15) score += 3;
+    else if (diff < 30) score += 1;
+  }
+
+  // 4. View count signal (+4/>10M, +3/>1M, +2/>100K, +1/>10K)
+  const viewText = textOf(ytVideo.short_view_count) || textOf(ytVideo.view_count) || ytVideo.viewCount || "";
+  const viewCount = parseViewCount(viewText);
+  if (viewCount > 10_000_000) score += 4;
+  else if (viewCount > 1_000_000) score += 3;
+  else if (viewCount > 100_000) score += 2;
+  else if (viewCount > 10_000) score += 1;
+
+  // 5. Channel authority boost (+6 for major labels/vevo)
+  const authorityKw = ["vevo", " - topic", "official", "records", "music india", "sony music", "t-series", "saregama", "zee music", "tips official", "universal music", "warner music", "island records", "capitol records", "republic records", "def jam", "atlantic records", "interscope", "cola boy"];
+  for (const kw of authorityKw) {
+    if (ytChannel.includes(kw)) { score += 6; break; }
+  }
+
+  // 6. Official/primary content boost (tiered)
+  if (ytTitle.includes("official music video") || ytTitle.includes("official video")) score += 8;
+  else if (ytTitle.includes("official audio")) score += 5;
+  else if (ytTitle.includes("official lyric video") || ytTitle.includes("lyrical")) score += 4;
+  else if (ytTitle.includes("visualizer")) score += 3;
+  else if (ytTitle.includes("lyric video")) score += 2;
+  else if (ytTitle.includes("audio")) score += 0;
+  else if (ytTitle.includes("official")) score += 6;
+
+  // 7. Expanded junk penalty (-20 each)
+  const junk = [
+    "reaction", "1 hour", "2 hour", "3 hour", "loop", "karaoke", "nightcore",
+    "sped up", "slowed", "reverb", "tutorial", "how to", "acoustic cover",
+    "instrumental", "piano cover", "guitar cover", "bass cover", "drum cover",
+    "edit", "mashup", "medley", "megamix", "dj mix", "extended mix",
+    "radio edit", "club mix", "dub mix", "trap remix", "phonk", "drift phonk",
+    "8d", "8d audio", "slowed and reverb", "bass boosted", "tiktok",
+    "ringtone", "whatsapp status", "shorts", "ringtone"
+  ];
+  for (const word of junk) {
+    if (ytTitle.includes(word)) score -= 20;
+  }
+  // "cover" only penalized if NOT an official release
+  if (ytTitle.includes("cover") && !ytTitle.includes("official")) score -= 20;
+  // "live" penalized only if not the official live version
+  if (ytTitle.includes("live") && !ytTitle.includes("official") && !ytTitle.includes("vevo")) score -= 10;
+  // "remix" penalized unless it's an official remix
+  if (ytTitle.includes("remix") && !ytTitle.includes("official")) score -= 15;
+
+  return score;
+}
+
+async function resolveSpotifyToYouTube(tracks, onProgress) {
+  const yt = await getInnertube();
+  const matched = [];
+  const unmatched = [];
+  const total = tracks.length;
+
+  for (let i = 0; i < total; i++) {
+    const track = tracks[i];
+    const queries = [];
+    const q1 = `${track.artist} ${track.title}`.trim();
+    if (q1) queries.push(q1);
+    const q2 = `${track.title} ${track.artist} official`.trim();
+    if (q2 && q2 !== q1) queries.push(q2);
+    const q3 = track.title.trim();
+    if (q3 && q3 !== q1 && q3 !== q2) queries.push(q3);
+
+    let bestVideo = null;
+    let bestScore = -Infinity;
+
+    for (let qi = 0; qi < queries.length; qi++) {
+      if (bestScore >= 5) break;
+
+      try {
+        if (qi > 0) await new Promise((r) => setTimeout(r, 1000));
+
+        const results = await yt.search(queries[qi], { type: "video", safe_search: true });
+        const videos = Array.isArray(results.videos) ? results.videos : [];
+
+        for (const video of videos) {
+          const score = scoreVideoMatch(track, video);
+          if (score > bestScore) {
+            bestScore = score;
+            bestVideo = video;
+          }
+        }
+      } catch {
+        // continue to next fallback query
+      }
+    }
+
+    if (bestVideo && bestScore >= 5) {
+      const videoId = bestVideo?.id || bestVideo?.video_id || "";
+      const durationText = textOf(bestVideo?.duration) || textOf(bestVideo?.length_text);
+      const durationSeconds = bestVideo?.duration?.seconds ?? 0;
+      const thumbUrl = pickThumbnail(bestVideo?.thumbnails);
+
+      const matchedTrack = {
+        videoId,
+        title: textOf(bestVideo?.title) || "YouTube video",
+        sourceUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        channelTitle: textOf(bestVideo?.author?.name),
+        thumbnail: proxyThumbnailUrl(thumbUrl),
+        durationLabel: durationText || formatSecondsLabel(durationSeconds)
+      };
+
+      matched.push(matchedTrack);
+      if (onProgress) {
+        onProgress({ done: i + 1, total, track, matched: matchedTrack });
+      }
+    } else {
+      unmatched.push({ title: track.title, artist: track.artist });
+      if (onProgress) onProgress({ done: i + 1, total, track, matched: null });
+    }
+  }
+
+  return { matched, unmatched };
+}
+
+async function resolveSpotifyToYouTubeAsync(room, tracks, opts) {
+  const { jobId, clientId, clientName, clientColor, onProgress, onComplete } = opts;
+  const yt = await getInnertube();
+  const unmatched = [];
+  const total = tracks.length;
+  let matchedCount = 0;
+  let isFirst = true;
+
+  for (let i = 0; i < total; i++) {
+    const track = tracks[i];
+    const queries = [];
+    const q1 = `${track.artist} ${track.title}`.trim();
+    if (q1) queries.push(q1);
+    const q2 = `${track.title} ${track.artist} official`.trim();
+    if (q2 && q2 !== q1) queries.push(q2);
+    const q3 = track.title.trim();
+    if (q3 && q3 !== q1 && q3 !== q2) queries.push(q3);
+
+    let bestVideo = null;
+    let bestScore = -Infinity;
+
+    for (let qi = 0; qi < queries.length; qi++) {
+      if (bestScore >= 5) break;
+
+      try {
+        if (qi > 0) await new Promise((r) => setTimeout(r, 1000));
+
+        const results = await yt.search(queries[qi], { type: "video", safe_search: true });
+        const videos = Array.isArray(results.videos) ? results.videos : [];
+
+        for (const video of videos) {
+          const score = scoreVideoMatch(track, video);
+          if (score > bestScore) {
+            bestScore = score;
+            bestVideo = video;
+          }
+        }
+      } catch {
+        // continue to next fallback query
+      }
+    }
+
+    const done = i + 1;
+    if (bestVideo && bestScore >= 5) {
+      const videoId = bestVideo?.id || bestVideo?.video_id || "";
+      const durationText = textOf(bestVideo?.duration) || textOf(bestVideo?.length_text);
+      const durationSeconds = bestVideo?.duration?.seconds ?? 0;
+      const thumbUrl = pickThumbnail(bestVideo?.thumbnails);
+
+      const matchedTrack = {
+        videoId,
+        title: textOf(bestVideo?.title) || "YouTube video",
+        sourceUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        channelTitle: textOf(bestVideo?.author?.name),
+        thumbnail: proxyThumbnailUrl(thumbUrl),
+        durationLabel: durationText || formatSecondsLabel(durationSeconds)
+      };
+
+      matchedCount++;
+      const command = {
+        type: (isFirst && !room.player.videoId && clientId === room.hostId) ? "load" : "enqueue",
+        clientId,
+        clientName,
+        clientColor,
+        ...matchedTrack
+      };
+      applyCommand(room, command);
+      broadcast(room, "state");
+      isFirst = false;
+    } else {
+      unmatched.push({ title: track.title, artist: track.artist });
+    }
+
+    if (onProgress) {
+      onProgress(done, total, track.title, matchedCount, unmatched.length);
+    }
+  }
+
+  if (onComplete) {
+    onComplete(matchedCount, unmatched.length, unmatched);
+  }
 }
 
 function extractYouTubeId(value) {
@@ -770,10 +1062,102 @@ async function handleApi(req, res, url) {
         sendJson(res, { ...snapshot(room), addedFromPlaylist: tracks.length });
         return true;
       }
+
+      const spotifyRef = extractSpotifyRef(command.sourceUrl || command.url || "");
+      if (spotifyRef) {
+        const spotifyData = await fetchSpotifyTracks(command.sourceUrl || command.url);
+        if (!spotifyData.tracks || spotifyData.tracks.length === 0) {
+          sendJson(res, { error: "Spotify playlist had no playable tracks." }, 404);
+          return true;
+        }
+        const { matched, unmatched } = await resolveSpotifyToYouTube(spotifyData.tracks);
+        if (matched.length === 0) {
+          sendJson(res, { error: "Could not match any Spotify tracks to YouTube videos." }, 404);
+          return true;
+        }
+        if (command.type === "load") {
+          applyCommand(room, { ...command, type: "load", ...matched[0] });
+          for (const track of matched.slice(1)) {
+            applyCommand(room, { ...command, type: "enqueue", ...track });
+          }
+        } else {
+          for (const track of matched) {
+            applyCommand(room, { ...command, type: "enqueue", ...track });
+          }
+        }
+        broadcast(room, "state");
+        sendJson(res, {
+          ...snapshot(room),
+          addedFromSpotify: matched.length,
+          unmatched: unmatched.length
+        });
+        return true;
+      }
     }
     applyCommand(room, command);
     broadcast(room, command.type === "heartbeat" ? "sync" : command.type || "state");
     sendJson(res, snapshot(room));
+    return true;
+  }
+
+  if (req.method === "POST" && action === "spotify-import") {
+    const body = await readBody(req);
+    const url = String(body.url || "").trim();
+    if (!url) {
+      sendJson(res, { error: "Missing url" }, 400);
+      return true;
+    }
+
+    const spotifyRef = extractSpotifyRef(url);
+    if (!spotifyRef) {
+      sendJson(res, { error: "Invalid Spotify URL" }, 400);
+      return true;
+    }
+
+    const spotifyData = await fetchSpotifyTracks(url);
+    if (!spotifyData.tracks || spotifyData.tracks.length === 0) {
+      sendJson(res, { error: "Spotify playlist had no playable tracks." }, 404);
+      return true;
+    }
+
+    const jobId = randomUUID();
+    const total = spotifyData.tracks.length;
+    const clientId = String(body.clientId || "").slice(0, 80);
+    const clientName = String(body.clientName || "Listener").slice(0, 80);
+    const clientColor = String(body.clientColor || "").slice(0, 24);
+
+    // Start async resolver (don't await)
+    resolveSpotifyToYouTubeAsync(room, spotifyData.tracks, {
+      jobId,
+      clientId,
+      clientName,
+      clientColor,
+      onProgress: (done, total, currentTitle, matchedCount, unmatchedCount) => {
+        broadcastRaw(room, "import-progress", {
+          jobId,
+          done,
+          total,
+          currentTitle,
+          matchedCount,
+          unmatchedCount
+        });
+      },
+      onComplete: (matchedCount, unmatchedCount, unmatched) => {
+        broadcastRaw(room, "import-complete", {
+          jobId,
+          matchedCount,
+          unmatchedCount,
+          unmatched
+        });
+      }
+    });
+
+    sendJson(res, {
+      jobId,
+      total,
+      name: spotifyData.name,
+      cover: spotifyData.cover
+    });
     return true;
   }
 

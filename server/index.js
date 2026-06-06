@@ -111,16 +111,36 @@ function snapshot(room) {
     hostId: room.hostId,
     participants: [...room.participants.values()],
     player: effectivePlayer(room.player),
-    queue: room.queue,
     playlist: room.playlist,
     currentIndex: room.currentIndex,
-    history: room.playlist.slice(0, Math.max(0, room.currentIndex)),
     serverTime: now()
+  };
+}
+
+function syncPayload(room) {
+  const player = effectivePlayer(room.player);
+  return {
+    id: room.id,
+    seq: room.seq,
+    serverTime: now(),
+    player: {
+      videoId: player.videoId,
+      playing: player.playing,
+      position: player.position,
+      updatedAt: player.updatedAt
+    }
   };
 }
 
 function broadcast(room, event = "state") {
   const payload = `event: ${event}\ndata: ${JSON.stringify(snapshot(room))}\n\n`;
+  for (const client of room.clients.values()) {
+    client.write(payload);
+  }
+}
+
+function broadcastSync(room) {
+  const payload = `event: sync\ndata: ${JSON.stringify(syncPayload(room))}\n\n`;
   for (const client of room.clients.values()) {
     client.write(payload);
   }
@@ -1059,7 +1079,7 @@ async function handleApi(req, res, url) {
           }
         }
         broadcast(room, "state");
-        sendJson(res, { ...snapshot(room), addedFromPlaylist: tracks.length });
+        sendJson(res, { ok: true, seq: room.seq, addedFromPlaylist: tracks.length });
         return true;
       }
 
@@ -1087,7 +1107,8 @@ async function handleApi(req, res, url) {
         }
         broadcast(room, "state");
         sendJson(res, {
-          ...snapshot(room),
+          ok: true,
+          seq: room.seq,
           addedFromSpotify: matched.length,
           unmatched: unmatched.length
         });
@@ -1095,8 +1116,12 @@ async function handleApi(req, res, url) {
       }
     }
     applyCommand(room, command);
-    broadcast(room, command.type === "heartbeat" ? "sync" : command.type || "state");
-    sendJson(res, snapshot(room));
+    if (command.type === "heartbeat") {
+      broadcastSync(room);
+    } else {
+      broadcast(room, command.type || "state");
+    }
+    sendJson(res, { ok: true, seq: room.seq });
     return true;
   }
 

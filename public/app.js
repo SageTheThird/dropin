@@ -636,11 +636,15 @@ function connectEvents() {
   });
   state.eventSource = new EventSource(`/api/rooms/${state.roomId}/events?${params.toString()}`);
 
-  for (const eventName of ["hello", "state", "presence", "load", "enqueue", "play", "pause", "seek", "next", "jump", "remove", "host", "sync"]) {
+  for (const eventName of ["hello", "state", "presence", "load", "enqueue", "play", "pause", "seek", "next", "jump", "remove", "host"]) {
     state.eventSource.addEventListener(eventName, (event) => {
       applyRoomState(JSON.parse(event.data), eventName);
     });
   }
+
+  state.eventSource.addEventListener("sync", (event) => {
+    handleSyncPatch(JSON.parse(event.data));
+  });
 
   state.eventSource.addEventListener("import-progress", (event) => {
     const data = JSON.parse(event.data);
@@ -672,6 +676,10 @@ function connectEvents() {
   });
 
   state.eventSource.addEventListener("open", () => {
+    if (state.pollTimer) {
+      window.clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
     flashStatus("In sync", "ok");
   });
   state.eventSource.addEventListener("error", () => {
@@ -706,11 +714,22 @@ async function sendCommand(command) {
     }
 
     const room = await response.json().catch(() => null);
-    if (room) applyRoomState(room, command.type || "state");
+    if (isRoomSnapshot(room)) applyRoomState(room, command.type || "state");
   } catch (error) {
     console.error("Command failed", error);
     flashStatus("Command blocked", "bad");
   }
+}
+
+function isRoomSnapshot(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    value.id &&
+    value.player &&
+    Array.isArray(value.participants) &&
+    Array.isArray(value.playlist)
+  );
 }
 
 function startPollingFallback() {
@@ -758,6 +777,59 @@ function applyRoomState(room, eventName) {
   } else if (eventName === "seek" || eventName === "jump") {
     debugPlayer(`Seeking ${Math.round(desiredTime)}s`);
     state.player.seekTo(desiredTime, true);
+  } else {
+    correctDrift(desiredTime);
+  }
+
+  if (remote.playing) {
+    state.player.playVideo();
+  } else {
+    state.player.pauseVideo();
+    correctDrift(desiredTime);
+  }
+
+  els.emptyPlayer.classList.add("is-hidden");
+  window.setTimeout(() => {
+    state.applyingRemote = false;
+  }, 700);
+}
+
+function handleSyncPatch(patch) {
+  if (!patch?.player) return;
+  if (Number.isFinite(patch.seq) && patch.seq < state.lastSeq) return;
+  if (Number.isFinite(patch.seq)) state.lastSeq = patch.seq;
+
+  const previousRoom = state.room || { id: patch.id, player: {}, playlist: [], participants: [] };
+  const room = {
+    ...previousRoom,
+    id: patch.id || previousRoom.id,
+    seq: Number.isFinite(patch.seq) ? patch.seq : previousRoom.seq,
+    serverTime: patch.serverTime,
+    player: {
+      ...(previousRoom.player || {}),
+      ...patch.player
+    }
+  };
+  state.room = room;
+
+  if (!state.playerReady) return;
+  const remote = room.player;
+  if (!remote.videoId) {
+    els.emptyPlayer.classList.remove("is-hidden");
+    return;
+  }
+
+  if (isHost(room)) return;
+
+  const currentVideo = state.player?.getVideoData?.()?.video_id;
+  const desiredTime = effectiveRemotePosition(room);
+
+  state.applyingRemote = true;
+
+  if (currentVideo !== remote.videoId) {
+    debugPlayer(`Loading ${remote.videoId}`);
+    state.player.loadVideoById(remote.videoId, desiredTime + (remote.playing ? 0.2 : 0));
+    state.player.setVolume(Number(els.volumeInput.value));
   } else {
     correctDrift(desiredTime);
   }

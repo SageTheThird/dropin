@@ -1,0 +1,51 @@
+name: CI / Deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Boot smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Boot server and assert 200
+        run: |
+          node server/index.js &
+          SVPID=$!
+          for i in $(seq 1 15); do
+            if curl -fsS -o /dev/null http://localhost:8787/; then
+              echo "Server responded 200 after ${i}s"
+              kill $SVPID 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server did not respond on :8787" >&2
+          kill $SVPID 2>/dev/null || true
+          exit 1
+
+  deploy:
+    name: Deploy to VPS
+    needs: smoke
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Trigger forced-command deploy over SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          install -m 600 /dev/stdin ~/.ssh/deploy_key <<< "${{ secrets.DEPLOY_SSH_KEY }}"
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "${{ github.sha }}"

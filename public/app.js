@@ -432,8 +432,8 @@ function renderImportPanel(state, info = {}) {
     `;
   } else if (state === "progress") {
     const pct = info.total > 0 ? Math.round((info.done / info.total) * 100) : 0;
-    const coverHtml = info.cover
-      ? `<img class="import-cover" src="${info.cover}" alt="" loading="lazy">`
+    const coverHtml = info.cover && /^https?:\/\//.test(info.cover)
+      ? `<img class="import-cover" src="${escapeHtml(info.cover)}" alt="" loading="lazy">`
       : "";
     const nameHtml = info.name
       ? `<p class="import-playlist-name">${escapeHtml(info.name)}</p>`
@@ -459,8 +459,8 @@ function renderImportPanel(state, info = {}) {
       <p class="import-status">${info.error || "Import failed"}</p>
     `;
   } else if (state === "done") {
-    const coverHtml = info.cover
-      ? `<img class="import-cover" src="${info.cover}" alt="" loading="lazy">`
+    const coverHtml = info.cover && /^https?:\/\//.test(info.cover)
+      ? `<img class="import-cover" src="${escapeHtml(info.cover)}" alt="" loading="lazy">`
       : "";
     const nameHtml = info.name
       ? `<p class="import-playlist-name">${escapeHtml(info.name)}</p>`

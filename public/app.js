@@ -384,6 +384,7 @@ async function startSpotifyImport(url) {
     });
 
     if (response.status === 401) {
+      state.spotifyImporting = false;
       handleUnauthorized();
       return;
     }
@@ -394,6 +395,16 @@ async function startSpotifyImport(url) {
       els.searchMessage.textContent = errMsg;
       renderImportPanel("error", { error: errMsg });
       showToast(errMsg, "bad");
+      state.spotifyImporting = false;
+      return;
+    }
+
+    if (!data?.jobId) {
+      const errMsg = "Spotify import did not start.";
+      els.searchMessage.textContent = errMsg;
+      renderImportPanel("error", { error: errMsg });
+      showToast(errMsg, "bad");
+      state.spotifyImporting = false;
       return;
     }
 
@@ -675,6 +686,18 @@ function connectEvents() {
     }
   });
 
+  state.eventSource.addEventListener("import-error", (event) => {
+    const data = JSON.parse(event.data);
+    if (state.importJob && data.jobId === state.importJob.jobId) {
+      const error = data.error || "Spotify import failed.";
+      els.searchMessage.textContent = error;
+      renderImportPanel("error", { error });
+      showToast(error, "bad");
+      state.spotifyImporting = false;
+      state.importJob = null;
+    }
+  });
+
   state.eventSource.addEventListener("open", () => {
     if (state.pollTimer) {
       window.clearInterval(state.pollTimer);
@@ -766,7 +789,7 @@ function applyRoomState(room, eventName) {
   const currentVideo = state.player?.getVideoData?.()?.video_id;
   const desiredTime = effectiveRemotePosition(room);
 
-  if (isHost() && (eventName === "sync" || eventName === "heartbeat")) return;
+  if (shouldSkipPlaybackApply(room, eventName, currentVideo, remote)) return;
 
   state.applyingRemote = true;
 
@@ -792,6 +815,14 @@ function applyRoomState(room, eventName) {
   window.setTimeout(() => {
     state.applyingRemote = false;
   }, 700);
+}
+
+function shouldSkipPlaybackApply(room, eventName, currentVideo, remote) {
+  if (!isHost(room)) return false;
+  if (eventName === "sync" || eventName === "heartbeat") return true;
+  if (["presence", "enqueue", "remove", "host"].includes(eventName)) return true;
+  if (eventName === "state" && currentVideo === remote.videoId) return true;
+  return false;
 }
 
 function handleSyncPatch(patch) {

@@ -14,6 +14,9 @@ const port = Number(process.env.PORT ?? 8787);
 loadEnvFile();
 
 const rooms = new Map();
+const activeImportJobs = new Map();
+const SPOTIFY_IMPORT_BATCH_SIZE = 8;
+const SPOTIFY_IMPORT_FLUSH_MS = 2500;
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -305,6 +308,19 @@ function loadPlaylistIndex(room, index, position = 0) {
   room.currentIndex = index;
   room.player = playerFromTrack(room.playlist[index], position);
   syncQueueFromPlaylist(room);
+}
+
+function enqueueTracks(room, tracks, command) {
+  const normalized = tracks.map((track) => normalizeTrack({
+    ...command,
+    type: "enqueue",
+    ...track
+  }));
+  if (normalized.length === 0) return 0;
+  room.playlist.push(...normalized);
+  syncQueueFromPlaylist(room);
+  touchRoom(room);
+  return normalized.length;
 }
 
 function proxyThumbnailUrl(url) {
@@ -724,7 +740,26 @@ async function resolveSpotifyToYouTubeAsync(room, tracks, opts) {
   const unmatched = [];
   const total = tracks.length;
   let matchedCount = 0;
-  let isFirst = true;
+  let pendingTracks = [];
+  let lastFlushAt = now();
+
+  const flushMatchedTracks = (force = false) => {
+    if (pendingTracks.length === 0) return;
+    const shouldFlush =
+      force ||
+      pendingTracks.length >= SPOTIFY_IMPORT_BATCH_SIZE ||
+      now() - lastFlushAt >= SPOTIFY_IMPORT_FLUSH_MS;
+    if (!shouldFlush) return;
+
+    enqueueTracks(room, pendingTracks, {
+      clientId,
+      clientName,
+      clientColor
+    });
+    pendingTracks = [];
+    lastFlushAt = now();
+    broadcast(room, "state");
+  };
 
   for (let i = 0; i < total; i++) {
     const track = tracks[i];
@@ -777,16 +812,8 @@ async function resolveSpotifyToYouTubeAsync(room, tracks, opts) {
       };
 
       matchedCount++;
-      const command = {
-        type: (isFirst && !room.player.videoId && clientId === room.hostId) ? "load" : "enqueue",
-        clientId,
-        clientName,
-        clientColor,
-        ...matchedTrack
-      };
-      applyCommand(room, command);
-      broadcast(room, "state");
-      isFirst = false;
+      pendingTracks.push(matchedTrack);
+      flushMatchedTracks();
     } else {
       unmatched.push({ title: track.title, artist: track.artist });
     }
@@ -795,6 +822,8 @@ async function resolveSpotifyToYouTubeAsync(room, tracks, opts) {
       onProgress(done, total, track.title, matchedCount, unmatched.length);
     }
   }
+
+  flushMatchedTracks(true);
 
   if (onComplete) {
     onComplete(matchedCount, unmatched.length, unmatched);
@@ -1126,6 +1155,11 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "POST" && action === "spotify-import") {
+    if (activeImportJobs.has(room.id)) {
+      sendJson(res, { error: "A Spotify import is already running in this room." }, 409);
+      return true;
+    }
+
     const body = await readBody(req);
     const url = String(body.url || "").trim();
     if (!url) {
@@ -1139,13 +1173,23 @@ async function handleApi(req, res, url) {
       return true;
     }
 
-    const spotifyData = await fetchSpotifyTracks(url);
+    const jobId = randomUUID();
+    activeImportJobs.set(room.id, { jobId, startedAt: now() });
+
+    let spotifyData;
+    try {
+      spotifyData = await fetchSpotifyTracks(url);
+    } catch (error) {
+      activeImportJobs.delete(room.id);
+      throw error;
+    }
+
     if (!spotifyData.tracks || spotifyData.tracks.length === 0) {
+      activeImportJobs.delete(room.id);
       sendJson(res, { error: "Spotify playlist had no playable tracks." }, 404);
       return true;
     }
 
-    const jobId = randomUUID();
     const total = spotifyData.tracks.length;
     const clientId = String(body.clientId || "").slice(0, 80);
     const clientName = String(body.clientName || "Listener").slice(0, 80);
@@ -1175,6 +1219,15 @@ async function handleApi(req, res, url) {
           unmatched
         });
       }
+    }).catch((error) => {
+      console.error("Spotify import failed:", error?.message || error);
+      broadcastRaw(room, "import-error", {
+        jobId,
+        error: "Spotify import failed. Try again in a moment."
+      });
+    }).finally(() => {
+      const active = activeImportJobs.get(room.id);
+      if (active?.jobId === jobId) activeImportJobs.delete(room.id);
     });
 
     sendJson(res, {

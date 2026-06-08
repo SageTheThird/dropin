@@ -220,7 +220,7 @@ export async function fetchSpotifyTracksViaPathfinder(playlistId, token) {
   // Fall back to the old shape if Spotify serves it during migration.
   let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&offset=0`;
 
-  while (url) {
+  while (url && allTracks.length < MAX_SPOTIFY_TRACKS) {
     const res = await fetch(url, { headers });
     if (!res.ok) {
       throw new Error(`Spotify tracks fetch failed: ${res.status} ${res.statusText}`);
@@ -235,6 +235,7 @@ export async function fetchSpotifyTracksViaPathfinder(playlistId, token) {
         artist: (track.artists || []).map((a) => a.name).join(", "),
         durationMs: track.duration_ms,
       });
+      if (allTracks.length >= MAX_SPOTIFY_TRACKS) break;
     }
 
     url = data.next;
@@ -264,7 +265,7 @@ export async function fetchSpotifyTracksWithAPI(playlistId, accessToken) {
   const allTracks = [];
   let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&offset=0`;
 
-  while (url) {
+  while (url && allTracks.length < MAX_SPOTIFY_TRACKS) {
     const res = await fetch(url, { headers });
     if (!res.ok) {
       throw new Error(`Spotify tracks fetch failed: ${res.status} ${res.statusText}`);
@@ -279,6 +280,7 @@ export async function fetchSpotifyTracksWithAPI(playlistId, accessToken) {
         artist: (track.artists || []).map((a) => a.name).join(", "),
         durationMs: track.duration_ms,
       });
+      if (allTracks.length >= MAX_SPOTIFY_TRACKS) break;
     }
 
     url = data.next;

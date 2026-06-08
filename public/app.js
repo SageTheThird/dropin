@@ -1,6 +1,8 @@
 const driftToleranceSeconds = 0.75;
 const hardSeekToleranceSeconds = 1.5;
 const seekBroadcastCooldownMs = 1000;
+const localSeekSettleMs = 1800;
+const localCommandEchoMs = 700;
 
 const els = {
   authGate: document.querySelector("#authGate"),
@@ -57,6 +59,9 @@ const state = {
   heartbeatTimer: null,
   lastPlayerState: null,
   lastSeekBroadcastAt: 0,
+  localSeekSettlingUntil: 0,
+  suppressedPlayerState: null,
+  suppressPlayerStateUntil: 0,
   lastSeq: -1,
   lastQueueSig: "",
   lastParticipantSig: "",
@@ -820,6 +825,7 @@ function applyRoomState(room, eventName) {
 function shouldSkipPlaybackApply(room, eventName, currentVideo, remote) {
   if (!isHost(room)) return false;
   if (eventName === "sync" || eventName === "heartbeat") return true;
+  if (["seek", "play", "pause"].includes(eventName)) return true;
   if (["presence", "enqueue", "remove", "host"].includes(eventName)) return true;
   if (eventName === "state" && currentVideo === remote.videoId) return true;
   return false;
@@ -894,8 +900,11 @@ function watchLocalDrift() {
   const drift = Math.abs(localTime - desiredTime);
 
   if (isHost()) {
-    if (drift > hardSeekToleranceSeconds && Date.now() - state.lastSeekBroadcastAt > seekBroadcastCooldownMs) {
-      state.lastSeekBroadcastAt = Date.now();
+    const time = Date.now();
+    if (time < state.localSeekSettlingUntil) return;
+    if (drift > hardSeekToleranceSeconds && time - state.lastSeekBroadcastAt > seekBroadcastCooldownMs) {
+      state.lastSeekBroadcastAt = time;
+      state.localSeekSettlingUntil = time + localSeekSettleMs;
       sendCommand({ type: "seek", position: localTime });
     }
     return;
@@ -1096,6 +1105,12 @@ function handlePlayerStateChange(playerState) {
     flashStatus("Host controls room", "warn");
     return;
   }
+  if (Date.now() < state.localSeekSettlingUntil && playerState === states.PLAYING) {
+    return;
+  }
+  if (Date.now() < state.suppressPlayerStateUntil && playerState === state.suppressedPlayerState) {
+    return;
+  }
   if (playerState === states.PLAYING) {
     sendCommand({ type: "play", position: getPlayerTime() });
   }
@@ -1123,7 +1138,33 @@ function sendPlaybackCommand(command) {
     flashStatus("Host controls playback", "warn");
     return;
   }
+  applyLocalPlaybackCommand(command);
+  suppressLocalPlaybackEcho(command);
   sendCommand(command);
+}
+
+function applyLocalPlaybackCommand(command) {
+  if (!state.playerReady) return;
+  if (command.type === "play") {
+    state.player.playVideo();
+    return;
+  }
+  if (command.type === "pause") {
+    state.player.pauseVideo();
+  }
+}
+
+function suppressLocalPlaybackEcho(command) {
+  const states = window.YT?.PlayerState;
+  if (!states) return;
+  if (command.type === "play") {
+    state.suppressedPlayerState = states.PLAYING;
+    state.suppressPlayerStateUntil = Date.now() + localCommandEchoMs;
+  }
+  if (command.type === "pause") {
+    state.suppressedPlayerState = states.PAUSED;
+    state.suppressPlayerStateUntil = Date.now() + localCommandEchoMs;
+  }
 }
 
 function waitForYouTube() {

@@ -54,6 +54,7 @@ function loadEnvFile() {
 }
 
 function createRoom(id) {
+  const createdAt = now();
   return {
     id,
     seq: 0,
@@ -76,7 +77,9 @@ function createRoom(id) {
     playlist: [],
     currentIndex: -1,
     history: [],
-    createdAt: now()
+    messages: [],
+    createdAt,
+    lastActivityAt: createdAt
   };
 }
 
@@ -116,8 +119,35 @@ function snapshot(room) {
     player: effectivePlayer(room.player),
     playlist: room.playlist,
     currentIndex: room.currentIndex,
+    messages: room.messages,
     serverTime: now()
   };
+}
+
+function roomSummary(room) {
+  const participants = [...room.participants.values()];
+  const host = participants.find((participant) => participant.id === room.hostId);
+  const player = effectivePlayer(room.player);
+  return {
+    id: room.id,
+    hostId: room.hostId,
+    hostName: host?.name || "",
+    participantCount: participants.length,
+    connectedCount: room.clients.size,
+    currentTitle: player.title || "",
+    currentVideoId: player.videoId || "",
+    playing: Boolean(player.videoId && player.playing),
+    playlistCount: room.playlist.length,
+    messageCount: room.messages.length,
+    createdAt: room.createdAt,
+    lastActivityAt: room.lastActivityAt || room.createdAt
+  };
+}
+
+function activeRoomSummaries() {
+  return [...rooms.values()]
+    .map(roomSummary)
+    .sort((left, right) => right.lastActivityAt - left.lastActivityAt);
 }
 
 function syncPayload(room) {
@@ -156,12 +186,56 @@ function broadcastRaw(room, eventType, data) {
   }
 }
 
+function addChatMessage(room, command) {
+  const clientId = String(command.clientId || "").slice(0, 80);
+  const text = String(command.text || "").replace(/\s+/g, " ").trim();
+  if (!clientId || !text) {
+    const err = new Error("Message cannot be empty.");
+    err.status = 400;
+    throw err;
+  }
+
+  const participant = updateParticipant(room, clientId, {
+    name: command.clientName,
+    color: command.clientColor
+  });
+  const message = {
+    id: randomUUID(),
+    clientId,
+    name: participant.name,
+    color: participant.color,
+    text,
+    sentAt: now()
+  };
+  room.messages.push(message);
+  markRoomActive(room);
+  return message;
+}
+
+function passHost(room, command) {
+  const clientId = String(command.clientId || "").slice(0, 80);
+  const targetClientId = String(command.targetClientId || "").slice(0, 80);
+  requireHost(room, clientId, "pass-host");
+  if (!targetClientId || !room.participants.has(targetClientId)) {
+    const err = new Error("Choose someone currently in the room.");
+    err.status = 400;
+    throw err;
+  }
+  room.hostId = targetClientId;
+  touchRoom(room);
+}
+
 function touchRoom(room) {
   room.seq += 1;
+  markRoomActive(room);
+}
+
+function markRoomActive(room) {
+  room.lastActivityAt = now();
 }
 
 function isPlaybackCommand(type) {
-  return ["load", "play", "pause", "seek", "next", "jump", "heartbeat"].includes(type);
+  return ["load", "play", "pause", "seek", "next", "jump", "heartbeat", "pass-host"].includes(type);
 }
 
 function requireHost(room, clientId, type) {
@@ -864,6 +938,7 @@ function updateParticipant(room, clientId, patch = {}) {
   };
   room.participants.set(clientId, participant);
   if (!room.hostId) room.hostId = clientId;
+  markRoomActive(room);
   return participant;
 }
 
@@ -982,9 +1057,13 @@ function applyCommand(room, command) {
     }
 
     case "host": {
-      if (clientId && room.participants.has(clientId)) {
+      if (clientId && room.participants.has(clientId) && (!room.hostId || room.hostId === clientId)) {
         room.hostId = clientId;
         touchRoom(room);
+      } else {
+        const err = new Error("Only the current host can hand off aux.");
+        err.status = 403;
+        throw err;
       }
       return;
     }
@@ -1032,6 +1111,11 @@ async function handleApi(req, res, url) {
       return true;
     }
     sendJson(res, await searchYouTube(query.slice(0, 120)));
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/rooms") {
+    sendJson(res, { rooms: activeRoomSummaries(), serverTime: now() });
     return true;
   }
 
@@ -1089,6 +1173,40 @@ async function handleApi(req, res, url) {
 
   if (req.method === "POST" && action === "commands") {
     const command = await readBody(req);
+    if (command.type === "chat") {
+      const message = addChatMessage(room, command);
+      broadcastRaw(room, "chat", message);
+      sendJson(res, { ok: true, seq: room.seq, messageId: message.id });
+      return true;
+    }
+
+    if (command.type === "request-host") {
+      const clientId = String(command.clientId || "").slice(0, 80);
+      if (!clientId) {
+        sendJson(res, { error: "Missing client id" }, 400);
+        return true;
+      }
+      const participant = updateParticipant(room, clientId, {
+        name: command.clientName,
+        color: command.clientColor
+      });
+      broadcastRaw(room, "host-request", {
+        clientId,
+        name: participant.name,
+        color: participant.color,
+        requestedAt: now()
+      });
+      sendJson(res, { ok: true, seq: room.seq });
+      return true;
+    }
+
+    if (command.type === "pass-host") {
+      passHost(room, command);
+      broadcast(room, "host");
+      sendJson(res, { ok: true, seq: room.seq });
+      return true;
+    }
+
     if (command.type === "enqueue" || command.type === "load") {
       const playlistId = extractPlaylistId(command.sourceUrl || command.url || "");
       if (playlistId) {

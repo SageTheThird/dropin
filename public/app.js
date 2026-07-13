@@ -10,7 +10,20 @@ const els = {
   authInput: document.querySelector("#authInput"),
   authError: document.querySelector("#authError"),
   roomId: document.querySelector("#roomId"),
+  roomsButton: document.querySelector("#roomsButton"),
+  roomsPopover: document.querySelector("#roomsPopover"),
+  roomsRefreshButton: document.querySelector("#roomsRefreshButton"),
+  roomsList: document.querySelector("#roomsList"),
+  roomsEmpty: document.querySelector("#roomsEmpty"),
   nameInput: document.querySelector("#nameInput"),
+  roomPeopleTab: document.querySelector("#roomPeopleTab"),
+  roomChatTab: document.querySelector("#roomChatTab"),
+  peoplePanel: document.querySelector("#peoplePanel"),
+  chatPanel: document.querySelector("#chatPanel"),
+  chatForm: document.querySelector("#chatForm"),
+  chatInput: document.querySelector("#chatInput"),
+  chatMessages: document.querySelector("#chatMessages"),
+  chatUnread: document.querySelector("#chatUnread"),
   searchForm: document.querySelector("#searchForm"),
   searchInput: document.querySelector("#searchInput"),
   searchTabButton: document.querySelector("#searchTabButton"),
@@ -65,6 +78,9 @@ const state = {
   lastSeq: -1,
   lastQueueSig: "",
   lastParticipantSig: "",
+  lastMessageSig: "",
+  activeRoomTab: "people",
+  unreadChat: 0,
   lastResults: null,
   lastBulkAddUrl: "",
   spotifyImporting: false,
@@ -94,7 +110,8 @@ async function init() {
   state.roomId = sanitizeRoomId(params.get("room") || hashRoom || "");
 
   if (!state.roomId) {
-    await createNewRoom();
+    const created = await createNewRoom();
+    if (!created) return;
   } else {
     updateUrlRoom(state.roomId);
   }
@@ -144,16 +161,42 @@ function bindEvents() {
   els.searchTabButton.addEventListener("click", () => setRailTab("search"));
   els.queueTabButton.addEventListener("click", () => setRailTab("queue"));
   els.queueAllButton.addEventListener("click", queueAllItems);
+  els.roomPeopleTab.addEventListener("click", () => setRoomTab("people"));
+  els.roomChatTab.addEventListener("click", () => setRoomTab("chat"));
+  els.chatForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendChatMessage();
+  });
 
   els.playButton.addEventListener("click", () => sendPlaybackCommand({ type: "play", position: getPlayerTime() }));
   els.pauseButton.addEventListener("click", () => sendPlaybackCommand({ type: "pause", position: getPlayerTime() }));
   els.nextButton.addEventListener("click", () => sendPlaybackCommand({ type: "next" }));
+  els.roomsButton.addEventListener("click", () => toggleRoomsPopover());
+  els.roomsRefreshButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    loadActiveRooms();
+  });
   els.copyLinkButton.addEventListener("click", shareRoomLink);
   els.newRoomButton.addEventListener("click", async () => {
-    await createNewRoom();
+    const created = await createNewRoom();
+    if (!created) return;
     connectEvents();
     sendCommand({ type: "join" });
+    if (!els.roomsPopover.hidden) loadActiveRooms();
     showToast("Fresh room", "ok");
+  });
+
+  document.addEventListener("click", (event) => {
+    if (els.roomsPopover.hidden) return;
+    if (els.roomsPopover.contains(event.target) || els.roomsButton.contains(event.target)) return;
+    toggleRoomsPopover(false);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !els.roomsPopover.hidden) {
+      toggleRoomsPopover(false);
+      els.roomsButton.focus();
+    }
   });
 
   els.volumeInput.addEventListener("input", () => {
@@ -261,15 +304,146 @@ async function createNewRoom() {
   const response = await fetch("/api/rooms", { method: "POST" });
   if (response.status === 401) {
     handleUnauthorized();
-    return;
+    return false;
   }
   const room = await response.json();
   state.roomId = room.id;
-  state.room = null;
+  resetRoomClientState();
   updateUrlRoom(state.roomId);
   els.roomId.textContent = state.roomId;
   els.searchResults.replaceChildren();
   els.searchMessage.textContent = "Search a song, then tap to add it.";
+  return true;
+}
+
+async function toggleRoomsPopover(force) {
+  const nextOpen = typeof force === "boolean" ? force : els.roomsPopover.hidden;
+  els.roomsPopover.hidden = !nextOpen;
+  els.roomsButton.setAttribute("aria-expanded", String(nextOpen));
+  if (nextOpen) await loadActiveRooms();
+}
+
+async function loadActiveRooms() {
+  els.roomsRefreshButton.disabled = true;
+  els.roomsList.setAttribute("aria-busy", "true");
+  try {
+    const response = await fetch("/api/rooms");
+    if (response.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+    if (!response.ok) throw new Error(`Active rooms failed: ${response.status}`);
+    const data = await response.json();
+    renderActiveRooms(Array.isArray(data.rooms) ? data.rooms : []);
+  } catch (error) {
+    console.error("Active rooms failed", error);
+    flashStatus("Rooms unavailable", "bad");
+  } finally {
+    els.roomsRefreshButton.disabled = false;
+    els.roomsList.removeAttribute("aria-busy");
+  }
+}
+
+function renderActiveRooms(rooms) {
+  els.roomsList.replaceChildren(
+    ...rooms.map((room) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "room-switch";
+      button.classList.toggle("is-current", room.id === state.roomId);
+      button.addEventListener("click", () => switchRoom(room.id));
+
+      const titleRow = document.createElement("span");
+      titleRow.className = "room-switch-title";
+
+      const code = document.createElement("strong");
+      code.textContent = room.id;
+
+      const status = document.createElement("span");
+      status.className = room.playing ? "room-status is-playing" : "room-status";
+      status.textContent = room.playing ? "Live" : "Idle";
+
+      titleRow.append(code, status);
+
+      const track = document.createElement("span");
+      track.className = "room-switch-track";
+      track.textContent = room.currentTitle || "No track loaded";
+
+      const meta = document.createElement("span");
+      meta.className = "room-switch-meta";
+      meta.textContent = activeRoomMeta(room);
+
+      button.append(titleRow, track, meta);
+      item.append(button);
+      return item;
+    })
+  );
+  els.roomsEmpty.hidden = rooms.length > 0;
+}
+
+function activeRoomMeta(room) {
+  const connected = Number(room.connectedCount || 0);
+  const known = Number(room.participantCount || 0);
+  const people = connected > 0 ? `${connected} live` : `${known} known`;
+  const tracks = formatCount(Number(room.playlistCount || 0), "track");
+  const messages = formatCount(Number(room.messageCount || 0), "message");
+  return `${people} - ${tracks} - ${messages} - ${formatRelativeTime(room.lastActivityAt)}`;
+}
+
+function formatCount(value, label) {
+  return `${value} ${label}${value === 1 ? "" : "s"}`;
+}
+
+function formatRelativeTime(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "new";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 15) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+async function switchRoom(roomId) {
+  const nextRoomId = sanitizeRoomId(roomId);
+  if (!nextRoomId) return;
+  if (nextRoomId === state.roomId) {
+    toggleRoomsPopover(false);
+    return;
+  }
+
+  state.roomId = nextRoomId;
+  resetRoomClientState();
+  updateUrlRoom(state.roomId);
+  els.roomId.textContent = state.roomId;
+  connectEvents();
+  sendCommand({ type: "join" });
+  toggleRoomsPopover(false);
+  showToast("Joined room", "ok");
+}
+
+function resetRoomClientState() {
+  state.room = null;
+  state.lastSeq = -1;
+  state.lastQueueSig = "";
+  state.lastParticipantSig = "";
+  state.lastMessageSig = "";
+  state.unreadChat = 0;
+  state.spotifyImporting = false;
+  state.importJob = null;
+  document.body.classList.remove("is-host");
+  els.queueList.replaceChildren();
+  els.participantList.replaceChildren();
+  els.chatMessages.replaceChildren();
+  els.queueCount.textContent = "0";
+  els.participantCount.textContent = "0";
+  updateChatUnread();
+  refreshEmptyStates();
 }
 
 async function shareRoomLink() {
@@ -662,6 +836,17 @@ function connectEvents() {
     handleSyncPatch(JSON.parse(event.data));
   });
 
+  state.eventSource.addEventListener("chat", (event) => {
+    appendChatMessage(JSON.parse(event.data));
+  });
+
+  state.eventSource.addEventListener("host-request", (event) => {
+    const data = JSON.parse(event.data);
+    if (isHost() && data.clientId !== clientId) {
+      showToast(`${data.name || "Someone"} asked for aux`, "warn");
+    }
+  });
+
   state.eventSource.addEventListener("import-progress", (event) => {
     const data = JSON.parse(event.data);
     if (state.importJob && data.jobId === state.importJob.jobId) {
@@ -746,6 +931,22 @@ async function sendCommand(command) {
   } catch (error) {
     console.error("Command failed", error);
     flashStatus("Command blocked", "bad");
+  }
+}
+
+function setRoomTab(tab) {
+  const isChat = tab === "chat";
+  state.activeRoomTab = isChat ? "chat" : "people";
+  els.roomPeopleTab.classList.toggle("is-active", !isChat);
+  els.roomChatTab.classList.toggle("is-active", isChat);
+  els.roomPeopleTab.setAttribute("aria-selected", String(!isChat));
+  els.roomChatTab.setAttribute("aria-selected", String(isChat));
+  els.peoplePanel.classList.toggle("is-active", !isChat);
+  els.chatPanel.classList.toggle("is-active", isChat);
+  if (isChat) {
+    state.unreadChat = 0;
+    updateChatUnread();
+    scrollChatToBottom();
   }
 }
 
@@ -955,6 +1156,14 @@ function renderRoom(room) {
     renderParticipantList(room);
   }
 
+  const messageSig = (room.messages || [])
+    .map((message) => `${message.id}|${message.text}|${message.name}|${message.sentAt}`)
+    .join("~");
+  if (messageSig !== state.lastMessageSig) {
+    state.lastMessageSig = messageSig;
+    renderChatMessages(room.messages || []);
+  }
+
   refreshEmptyStates();
 }
 
@@ -1048,12 +1257,130 @@ function renderParticipantList(room) {
       name.textContent = participant.name;
       const meta = document.createElement("div");
       meta.className = "participant-meta";
-      meta.textContent = participant.id === room.hostId ? "Host" : "Listener";
+      meta.textContent = participant.id === room.hostId ? "Aux" : "Listener";
       content.append(name, meta);
-      item.append(dot, content);
+
+      const action = document.createElement("button");
+      action.className = "aux-button";
+      action.type = "button";
+      if (participant.id === room.hostId) {
+        action.disabled = true;
+        action.textContent = "Live";
+        action.title = "Currently holding aux";
+      } else if (isHost(room)) {
+        action.textContent = "Give";
+        action.title = `Give aux to ${participant.name}`;
+        action.addEventListener("click", () => {
+          sendCommand({ type: "pass-host", targetClientId: participant.id });
+          showToast(`Aux passed to ${participant.name}`, "ok");
+        });
+      } else if (participant.id === clientId) {
+        action.textContent = "Ask";
+        action.title = "Ask for aux";
+        action.addEventListener("click", () => {
+          sendCommand({ type: "request-host" });
+          showToast("Asked for aux", "ok");
+        });
+      } else {
+        action.disabled = true;
+        action.textContent = "Aux";
+        action.title = "Only the current aux holder can pass controls";
+      }
+
+      item.append(dot, content, action);
       return item;
     })
   );
+}
+
+function sendChatMessage() {
+  const text = els.chatInput.value.trim();
+  if (!text) return;
+  sendCommand({ type: "chat", text });
+  els.chatInput.value = "";
+}
+
+function appendChatMessage(message) {
+  const messages = [...(state.room?.messages || [])];
+  if (messages.some((item) => item.id === message.id)) return;
+  messages.push(message);
+  state.room = {
+    ...(state.room || {}),
+    messages
+  };
+  state.lastMessageSig = messages
+    .map((item) => `${item.id}|${item.text}|${item.name}|${item.sentAt}`)
+    .join("~");
+  const shouldStick = isChatNearBottom();
+  els.chatMessages.append(chatMessageElement(message));
+  if (state.activeRoomTab === "chat") {
+    if (shouldStick) scrollChatToBottom();
+  } else {
+    state.unreadChat += 1;
+    updateChatUnread();
+  }
+}
+
+function renderChatMessages(messages) {
+  const shouldStick = isChatNearBottom();
+  els.chatMessages.replaceChildren(...messages.map(chatMessageElement));
+  if (state.activeRoomTab === "chat" && shouldStick) scrollChatToBottom();
+  updateChatUnread();
+}
+
+function chatMessageElement(message) {
+  const item = document.createElement("li");
+  item.className = "chat-message";
+  item.classList.toggle("is-mine", message.clientId === clientId);
+
+  const dot = document.createElement("div");
+  dot.className = "chat-dot";
+  const baseColor = message.color || hashColor(message.clientId || message.name || "?");
+  dot.style.background = `linear-gradient(135deg, ${tintColor(baseColor, 18)}, ${baseColor})`;
+  dot.textContent = (message.name || "?").trim().charAt(0).toUpperCase() || "?";
+
+  const body = document.createElement("div");
+  body.className = "chat-body";
+
+  const meta = document.createElement("div");
+  meta.className = "chat-meta";
+  const name = document.createElement("strong");
+  name.textContent = message.name || "Listener";
+  const time = document.createElement("time");
+  time.dateTime = new Date(message.sentAt || Date.now()).toISOString();
+  time.textContent = formatChatTime(message.sentAt);
+  meta.append(name, time);
+
+  const text = document.createElement("p");
+  text.textContent = message.text || "";
+
+  body.append(meta, text);
+  item.append(dot, body);
+  return item;
+}
+
+function updateChatUnread() {
+  els.chatUnread.hidden = state.unreadChat === 0;
+  els.chatUnread.textContent = String(Math.min(state.unreadChat, 9));
+}
+
+function isChatNearBottom() {
+  if (!els.chatMessages) return true;
+  const remaining = els.chatMessages.scrollHeight - els.chatMessages.scrollTop - els.chatMessages.clientHeight;
+  return remaining < 40;
+}
+
+function scrollChatToBottom() {
+  if (els.chatMessages) els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function formatChatTime(value) {
+  const date = new Date(value || Date.now());
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
 }
 
 function buildSessionQueue(room) {

@@ -10,6 +10,11 @@ const els = {
   authInput: document.querySelector("#authInput"),
   authError: document.querySelector("#authError"),
   roomId: document.querySelector("#roomId"),
+  roomsButton: document.querySelector("#roomsButton"),
+  roomsPopover: document.querySelector("#roomsPopover"),
+  roomsRefreshButton: document.querySelector("#roomsRefreshButton"),
+  roomsList: document.querySelector("#roomsList"),
+  roomsEmpty: document.querySelector("#roomsEmpty"),
   nameInput: document.querySelector("#nameInput"),
   roomPeopleTab: document.querySelector("#roomPeopleTab"),
   roomChatTab: document.querySelector("#roomChatTab"),
@@ -105,7 +110,8 @@ async function init() {
   state.roomId = sanitizeRoomId(params.get("room") || hashRoom || "");
 
   if (!state.roomId) {
-    await createNewRoom();
+    const created = await createNewRoom();
+    if (!created) return;
   } else {
     updateUrlRoom(state.roomId);
   }
@@ -165,12 +171,32 @@ function bindEvents() {
   els.playButton.addEventListener("click", () => sendPlaybackCommand({ type: "play", position: getPlayerTime() }));
   els.pauseButton.addEventListener("click", () => sendPlaybackCommand({ type: "pause", position: getPlayerTime() }));
   els.nextButton.addEventListener("click", () => sendPlaybackCommand({ type: "next" }));
+  els.roomsButton.addEventListener("click", () => toggleRoomsPopover());
+  els.roomsRefreshButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    loadActiveRooms();
+  });
   els.copyLinkButton.addEventListener("click", shareRoomLink);
   els.newRoomButton.addEventListener("click", async () => {
-    await createNewRoom();
+    const created = await createNewRoom();
+    if (!created) return;
     connectEvents();
     sendCommand({ type: "join" });
+    if (!els.roomsPopover.hidden) loadActiveRooms();
     showToast("Fresh room", "ok");
+  });
+
+  document.addEventListener("click", (event) => {
+    if (els.roomsPopover.hidden) return;
+    if (els.roomsPopover.contains(event.target) || els.roomsButton.contains(event.target)) return;
+    toggleRoomsPopover(false);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !els.roomsPopover.hidden) {
+      toggleRoomsPopover(false);
+      els.roomsButton.focus();
+    }
   });
 
   els.volumeInput.addEventListener("input", () => {
@@ -278,15 +304,146 @@ async function createNewRoom() {
   const response = await fetch("/api/rooms", { method: "POST" });
   if (response.status === 401) {
     handleUnauthorized();
-    return;
+    return false;
   }
   const room = await response.json();
   state.roomId = room.id;
-  state.room = null;
+  resetRoomClientState();
   updateUrlRoom(state.roomId);
   els.roomId.textContent = state.roomId;
   els.searchResults.replaceChildren();
   els.searchMessage.textContent = "Search a song, then tap to add it.";
+  return true;
+}
+
+async function toggleRoomsPopover(force) {
+  const nextOpen = typeof force === "boolean" ? force : els.roomsPopover.hidden;
+  els.roomsPopover.hidden = !nextOpen;
+  els.roomsButton.setAttribute("aria-expanded", String(nextOpen));
+  if (nextOpen) await loadActiveRooms();
+}
+
+async function loadActiveRooms() {
+  els.roomsRefreshButton.disabled = true;
+  els.roomsList.setAttribute("aria-busy", "true");
+  try {
+    const response = await fetch("/api/rooms");
+    if (response.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+    if (!response.ok) throw new Error(`Active rooms failed: ${response.status}`);
+    const data = await response.json();
+    renderActiveRooms(Array.isArray(data.rooms) ? data.rooms : []);
+  } catch (error) {
+    console.error("Active rooms failed", error);
+    flashStatus("Rooms unavailable", "bad");
+  } finally {
+    els.roomsRefreshButton.disabled = false;
+    els.roomsList.removeAttribute("aria-busy");
+  }
+}
+
+function renderActiveRooms(rooms) {
+  els.roomsList.replaceChildren(
+    ...rooms.map((room) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "room-switch";
+      button.classList.toggle("is-current", room.id === state.roomId);
+      button.addEventListener("click", () => switchRoom(room.id));
+
+      const titleRow = document.createElement("span");
+      titleRow.className = "room-switch-title";
+
+      const code = document.createElement("strong");
+      code.textContent = room.id;
+
+      const status = document.createElement("span");
+      status.className = room.playing ? "room-status is-playing" : "room-status";
+      status.textContent = room.playing ? "Live" : "Idle";
+
+      titleRow.append(code, status);
+
+      const track = document.createElement("span");
+      track.className = "room-switch-track";
+      track.textContent = room.currentTitle || "No track loaded";
+
+      const meta = document.createElement("span");
+      meta.className = "room-switch-meta";
+      meta.textContent = activeRoomMeta(room);
+
+      button.append(titleRow, track, meta);
+      item.append(button);
+      return item;
+    })
+  );
+  els.roomsEmpty.hidden = rooms.length > 0;
+}
+
+function activeRoomMeta(room) {
+  const connected = Number(room.connectedCount || 0);
+  const known = Number(room.participantCount || 0);
+  const people = connected > 0 ? `${connected} live` : `${known} known`;
+  const tracks = formatCount(Number(room.playlistCount || 0), "track");
+  const messages = formatCount(Number(room.messageCount || 0), "message");
+  return `${people} - ${tracks} - ${messages} - ${formatRelativeTime(room.lastActivityAt)}`;
+}
+
+function formatCount(value, label) {
+  return `${value} ${label}${value === 1 ? "" : "s"}`;
+}
+
+function formatRelativeTime(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "new";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (seconds < 15) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+async function switchRoom(roomId) {
+  const nextRoomId = sanitizeRoomId(roomId);
+  if (!nextRoomId) return;
+  if (nextRoomId === state.roomId) {
+    toggleRoomsPopover(false);
+    return;
+  }
+
+  state.roomId = nextRoomId;
+  resetRoomClientState();
+  updateUrlRoom(state.roomId);
+  els.roomId.textContent = state.roomId;
+  connectEvents();
+  sendCommand({ type: "join" });
+  toggleRoomsPopover(false);
+  showToast("Joined room", "ok");
+}
+
+function resetRoomClientState() {
+  state.room = null;
+  state.lastSeq = -1;
+  state.lastQueueSig = "";
+  state.lastParticipantSig = "";
+  state.lastMessageSig = "";
+  state.unreadChat = 0;
+  state.spotifyImporting = false;
+  state.importJob = null;
+  document.body.classList.remove("is-host");
+  els.queueList.replaceChildren();
+  els.participantList.replaceChildren();
+  els.chatMessages.replaceChildren();
+  els.queueCount.textContent = "0";
+  els.participantCount.textContent = "0";
+  updateChatUnread();
+  refreshEmptyStates();
 }
 
 async function shareRoomLink() {

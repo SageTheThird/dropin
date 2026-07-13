@@ -54,6 +54,7 @@ function loadEnvFile() {
 }
 
 function createRoom(id) {
+  const createdAt = now();
   return {
     id,
     seq: 0,
@@ -77,7 +78,8 @@ function createRoom(id) {
     currentIndex: -1,
     history: [],
     messages: [],
-    createdAt: now()
+    createdAt,
+    lastActivityAt: createdAt
   };
 }
 
@@ -120,6 +122,32 @@ function snapshot(room) {
     messages: room.messages,
     serverTime: now()
   };
+}
+
+function roomSummary(room) {
+  const participants = [...room.participants.values()];
+  const host = participants.find((participant) => participant.id === room.hostId);
+  const player = effectivePlayer(room.player);
+  return {
+    id: room.id,
+    hostId: room.hostId,
+    hostName: host?.name || "",
+    participantCount: participants.length,
+    connectedCount: room.clients.size,
+    currentTitle: player.title || "",
+    currentVideoId: player.videoId || "",
+    playing: Boolean(player.videoId && player.playing),
+    playlistCount: room.playlist.length,
+    messageCount: room.messages.length,
+    createdAt: room.createdAt,
+    lastActivityAt: room.lastActivityAt || room.createdAt
+  };
+}
+
+function activeRoomSummaries() {
+  return [...rooms.values()]
+    .map(roomSummary)
+    .sort((left, right) => right.lastActivityAt - left.lastActivityAt);
 }
 
 function syncPayload(room) {
@@ -180,6 +208,7 @@ function addChatMessage(room, command) {
     sentAt: now()
   };
   room.messages.push(message);
+  markRoomActive(room);
   return message;
 }
 
@@ -198,6 +227,11 @@ function passHost(room, command) {
 
 function touchRoom(room) {
   room.seq += 1;
+  markRoomActive(room);
+}
+
+function markRoomActive(room) {
+  room.lastActivityAt = now();
 }
 
 function isPlaybackCommand(type) {
@@ -904,6 +938,7 @@ function updateParticipant(room, clientId, patch = {}) {
   };
   room.participants.set(clientId, participant);
   if (!room.hostId) room.hostId = clientId;
+  markRoomActive(room);
   return participant;
 }
 
@@ -1076,6 +1111,11 @@ async function handleApi(req, res, url) {
       return true;
     }
     sendJson(res, await searchYouTube(query.slice(0, 120)));
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/rooms") {
+    sendJson(res, { rooms: activeRoomSummaries(), serverTime: now() });
     return true;
   }
 

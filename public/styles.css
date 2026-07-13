@@ -663,6 +663,7 @@ svg {
 }
 
 .header-actions {
+  position: relative;
   grid-area: actions;
   display: flex;
   gap: 8px;
@@ -701,6 +702,166 @@ svg {
   letter-spacing: 0.02em;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rooms-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 28px));
+  max-height: min(520px, calc(100vh - 100px));
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: rgba(18, 15, 19, 0.96);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(18px);
+}
+
+.rooms-popover[hidden] {
+  display: none;
+}
+
+.rooms-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+}
+
+.rooms-popover-head div {
+  display: grid;
+  gap: 1px;
+}
+
+.rooms-popover-head span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.rooms-popover-head strong {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.rooms-refresh-button {
+  width: 34px;
+  min-height: 34px;
+}
+
+.rooms-list {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  max-height: 410px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.room-switch {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 248, 232, 0.05);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--t-base) var(--ease),
+    background var(--t-base) var(--ease),
+    transform var(--t-base) var(--ease);
+}
+
+.room-switch:hover,
+.room-switch:focus-visible {
+  border-color: rgba(147, 233, 255, 0.46);
+  background: rgba(147, 233, 255, 0.08);
+  outline: none;
+}
+
+.room-switch:active {
+  transform: translateY(1px);
+}
+
+.room-switch.is-current {
+  border-color: rgba(124, 231, 189, 0.5);
+  background: rgba(124, 231, 189, 0.09);
+}
+
+.room-switch-title,
+.room-switch-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.room-switch-title strong {
+  overflow: hidden;
+  color: var(--accent-3);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-status {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.room-status.is-playing {
+  border-color: rgba(124, 231, 189, 0.38);
+  color: var(--accent-2);
+  background: rgba(124, 231, 189, 0.08);
+}
+
+.room-switch-track {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-switch-meta {
+  color: var(--subtle);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.rooms-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
 }
 
 /* ============================================================

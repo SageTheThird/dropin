@@ -11,6 +11,14 @@ const els = {
   authError: document.querySelector("#authError"),
   roomId: document.querySelector("#roomId"),
   nameInput: document.querySelector("#nameInput"),
+  roomPeopleTab: document.querySelector("#roomPeopleTab"),
+  roomChatTab: document.querySelector("#roomChatTab"),
+  peoplePanel: document.querySelector("#peoplePanel"),
+  chatPanel: document.querySelector("#chatPanel"),
+  chatForm: document.querySelector("#chatForm"),
+  chatInput: document.querySelector("#chatInput"),
+  chatMessages: document.querySelector("#chatMessages"),
+  chatUnread: document.querySelector("#chatUnread"),
   searchForm: document.querySelector("#searchForm"),
   searchInput: document.querySelector("#searchInput"),
   searchTabButton: document.querySelector("#searchTabButton"),
@@ -65,6 +73,9 @@ const state = {
   lastSeq: -1,
   lastQueueSig: "",
   lastParticipantSig: "",
+  lastMessageSig: "",
+  activeRoomTab: "people",
+  unreadChat: 0,
   lastResults: null,
   lastBulkAddUrl: "",
   spotifyImporting: false,
@@ -144,6 +155,12 @@ function bindEvents() {
   els.searchTabButton.addEventListener("click", () => setRailTab("search"));
   els.queueTabButton.addEventListener("click", () => setRailTab("queue"));
   els.queueAllButton.addEventListener("click", queueAllItems);
+  els.roomPeopleTab.addEventListener("click", () => setRoomTab("people"));
+  els.roomChatTab.addEventListener("click", () => setRoomTab("chat"));
+  els.chatForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendChatMessage();
+  });
 
   els.playButton.addEventListener("click", () => sendPlaybackCommand({ type: "play", position: getPlayerTime() }));
   els.pauseButton.addEventListener("click", () => sendPlaybackCommand({ type: "pause", position: getPlayerTime() }));
@@ -662,6 +679,17 @@ function connectEvents() {
     handleSyncPatch(JSON.parse(event.data));
   });
 
+  state.eventSource.addEventListener("chat", (event) => {
+    appendChatMessage(JSON.parse(event.data));
+  });
+
+  state.eventSource.addEventListener("host-request", (event) => {
+    const data = JSON.parse(event.data);
+    if (isHost() && data.clientId !== clientId) {
+      showToast(`${data.name || "Someone"} asked for aux`, "warn");
+    }
+  });
+
   state.eventSource.addEventListener("import-progress", (event) => {
     const data = JSON.parse(event.data);
     if (state.importJob && data.jobId === state.importJob.jobId) {
@@ -746,6 +774,22 @@ async function sendCommand(command) {
   } catch (error) {
     console.error("Command failed", error);
     flashStatus("Command blocked", "bad");
+  }
+}
+
+function setRoomTab(tab) {
+  const isChat = tab === "chat";
+  state.activeRoomTab = isChat ? "chat" : "people";
+  els.roomPeopleTab.classList.toggle("is-active", !isChat);
+  els.roomChatTab.classList.toggle("is-active", isChat);
+  els.roomPeopleTab.setAttribute("aria-selected", String(!isChat));
+  els.roomChatTab.setAttribute("aria-selected", String(isChat));
+  els.peoplePanel.classList.toggle("is-active", !isChat);
+  els.chatPanel.classList.toggle("is-active", isChat);
+  if (isChat) {
+    state.unreadChat = 0;
+    updateChatUnread();
+    scrollChatToBottom();
   }
 }
 
@@ -955,6 +999,14 @@ function renderRoom(room) {
     renderParticipantList(room);
   }
 
+  const messageSig = (room.messages || [])
+    .map((message) => `${message.id}|${message.text}|${message.name}|${message.sentAt}`)
+    .join("~");
+  if (messageSig !== state.lastMessageSig) {
+    state.lastMessageSig = messageSig;
+    renderChatMessages(room.messages || []);
+  }
+
   refreshEmptyStates();
 }
 
@@ -1048,12 +1100,131 @@ function renderParticipantList(room) {
       name.textContent = participant.name;
       const meta = document.createElement("div");
       meta.className = "participant-meta";
-      meta.textContent = participant.id === room.hostId ? "Host" : "Listener";
+      meta.textContent = participant.id === room.hostId ? "Aux" : "Listener";
       content.append(name, meta);
-      item.append(dot, content);
+
+      const action = document.createElement("button");
+      action.className = "aux-button";
+      action.type = "button";
+      if (participant.id === room.hostId) {
+        action.disabled = true;
+        action.textContent = "Live";
+        action.title = "Currently holding aux";
+      } else if (isHost(room)) {
+        action.textContent = "Give";
+        action.title = `Give aux to ${participant.name}`;
+        action.addEventListener("click", () => {
+          sendCommand({ type: "pass-host", targetClientId: participant.id });
+          showToast(`Aux passed to ${participant.name}`, "ok");
+        });
+      } else if (participant.id === clientId) {
+        action.textContent = "Ask";
+        action.title = "Ask for aux";
+        action.addEventListener("click", () => {
+          sendCommand({ type: "request-host" });
+          showToast("Asked for aux", "ok");
+        });
+      } else {
+        action.disabled = true;
+        action.textContent = "Aux";
+        action.title = "Only the current aux holder can pass controls";
+      }
+
+      item.append(dot, content, action);
       return item;
     })
   );
+}
+
+function sendChatMessage() {
+  const text = els.chatInput.value.trim();
+  if (!text) return;
+  sendCommand({ type: "chat", text });
+  els.chatInput.value = "";
+}
+
+function appendChatMessage(message) {
+  const messages = [...(state.room?.messages || [])];
+  if (messages.some((item) => item.id === message.id)) return;
+  messages.push(message);
+  if (messages.length > 80) messages.splice(0, messages.length - 80);
+  state.room = {
+    ...(state.room || {}),
+    messages
+  };
+  state.lastMessageSig = messages
+    .map((item) => `${item.id}|${item.text}|${item.name}|${item.sentAt}`)
+    .join("~");
+  const shouldStick = isChatNearBottom();
+  els.chatMessages.append(chatMessageElement(message));
+  if (state.activeRoomTab === "chat") {
+    if (shouldStick) scrollChatToBottom();
+  } else {
+    state.unreadChat += 1;
+    updateChatUnread();
+  }
+}
+
+function renderChatMessages(messages) {
+  const shouldStick = isChatNearBottom();
+  els.chatMessages.replaceChildren(...messages.map(chatMessageElement));
+  if (state.activeRoomTab === "chat" && shouldStick) scrollChatToBottom();
+  updateChatUnread();
+}
+
+function chatMessageElement(message) {
+  const item = document.createElement("li");
+  item.className = "chat-message";
+  item.classList.toggle("is-mine", message.clientId === clientId);
+
+  const dot = document.createElement("div");
+  dot.className = "chat-dot";
+  const baseColor = message.color || hashColor(message.clientId || message.name || "?");
+  dot.style.background = `linear-gradient(135deg, ${tintColor(baseColor, 18)}, ${baseColor})`;
+  dot.textContent = (message.name || "?").trim().charAt(0).toUpperCase() || "?";
+
+  const body = document.createElement("div");
+  body.className = "chat-body";
+
+  const meta = document.createElement("div");
+  meta.className = "chat-meta";
+  const name = document.createElement("strong");
+  name.textContent = message.name || "Listener";
+  const time = document.createElement("time");
+  time.dateTime = new Date(message.sentAt || Date.now()).toISOString();
+  time.textContent = formatChatTime(message.sentAt);
+  meta.append(name, time);
+
+  const text = document.createElement("p");
+  text.textContent = message.text || "";
+
+  body.append(meta, text);
+  item.append(dot, body);
+  return item;
+}
+
+function updateChatUnread() {
+  els.chatUnread.hidden = state.unreadChat === 0;
+  els.chatUnread.textContent = String(Math.min(state.unreadChat, 9));
+}
+
+function isChatNearBottom() {
+  if (!els.chatMessages) return true;
+  const remaining = els.chatMessages.scrollHeight - els.chatMessages.scrollTop - els.chatMessages.clientHeight;
+  return remaining < 40;
+}
+
+function scrollChatToBottom() {
+  if (els.chatMessages) els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function formatChatTime(value) {
+  const date = new Date(value || Date.now());
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
 }
 
 function buildSessionQueue(room) {

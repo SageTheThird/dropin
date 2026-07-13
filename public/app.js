@@ -1147,7 +1147,6 @@ function appendChatMessage(message) {
   const messages = [...(state.room?.messages || [])];
   if (messages.some((item) => item.id === message.id)) return;
   messages.push(message);
-  if (messages.length > 80) messages.splice(0, messages.length - 80);
   state.room = {
     ...(state.room || {}),
     messages

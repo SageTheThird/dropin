@@ -17,8 +17,6 @@ const rooms = new Map();
 const activeImportJobs = new Map();
 const SPOTIFY_IMPORT_BATCH_SIZE = 8;
 const SPOTIFY_IMPORT_FLUSH_MS = 2500;
-const MAX_CHAT_MESSAGES = 80;
-const MAX_CHAT_MESSAGE_LENGTH = 500;
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -162,7 +160,7 @@ function broadcastRaw(room, eventType, data) {
 
 function addChatMessage(room, command) {
   const clientId = String(command.clientId || "").slice(0, 80);
-  const text = String(command.text || "").replace(/\s+/g, " ").trim().slice(0, MAX_CHAT_MESSAGE_LENGTH);
+  const text = String(command.text || "").replace(/\s+/g, " ").trim();
   if (!clientId || !text) {
     const err = new Error("Message cannot be empty.");
     err.status = 400;
@@ -182,9 +180,6 @@ function addChatMessage(room, command) {
     sentAt: now()
   };
   room.messages.push(message);
-  if (room.messages.length > MAX_CHAT_MESSAGES) {
-    room.messages.splice(0, room.messages.length - MAX_CHAT_MESSAGES);
-  }
   return message;
 }
 

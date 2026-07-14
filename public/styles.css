@@ -2676,6 +2676,63 @@ body.is-playing .now-vinyl-disc {
 }
 
 /* ============================================================
+   Responsive — compact desktop height
+   ============================================================ */
+
+@media (min-width: 1060px) and (max-height: 900px) {
+  .side-rail {
+    grid-template-rows: auto minmax(280px, 1fr) minmax(0, auto);
+  }
+
+  .rail-tabs {
+    display: grid;
+    order: 0;
+  }
+
+  .rail-section:not(.is-active) {
+    display: none;
+  }
+
+  .rail-section,
+  .rail-section.is-active {
+    order: 1;
+    min-height: 0;
+  }
+
+  .listeners-panel {
+    order: 2;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    max-height: min(34dvh, 300px);
+    min-height: 0;
+  }
+
+  .listeners-panel:not([open]) {
+    display: block;
+  }
+
+  .listeners-content,
+  .room-panel.is-active,
+  .chat-panel.is-active {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .chat-panel.is-active {
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .chat-list {
+    max-height: none;
+  }
+
+  .result-list,
+  .queue-list {
+    min-height: 0;
+  }
+}
+
+/* ============================================================
    Spotify Import Panel
    ============================================================ */
 
